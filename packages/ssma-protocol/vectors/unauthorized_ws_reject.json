@@ -1,0 +1,19 @@
+{
+  "name": "unauthorized_ws_reject",
+  "client": [
+    {
+      "type": "intent.batch",
+      "intents": [
+        {
+          "id": "i-unauth",
+          "intent": "TODO_CREATE",
+          "payload": { "id": "todo-x" },
+          "meta": { "clock": 1 }
+        }
+      ]
+    }
+  ],
+  "server": [
+    { "type": "error", "code": "UNAUTHORIZED" }
+  ]
+}

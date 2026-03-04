@@ -1,0 +1,20 @@
+export const errorsContracts = {
+  "ERROR_FRAME": {
+    "version": 1,
+    "type": "event",
+    "owner": "optimistic-sync",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "error" },
+        "code": { "type": "string", "minLength": 1, "maxLength": 96 },
+        "message": { "type": "string", "maxLength": 512 },
+        "details": {}
+      },
+      "required": ["type", "code"],
+      "additionalProperties": true
+    }
+  }
+}
+;
+export default errorsContracts;

@@ -1,0 +1,24 @@
+{
+  "name": "intent_batch_ack",
+  "client": [
+    {
+      "type": "intent.batch",
+      "intents": [
+        {
+          "id": "i-1-0001",
+          "intent": "TODO_CREATE",
+          "payload": { "id": "todo-1", "title": "one" },
+          "meta": { "clock": 1, "channels": ["global"] }
+        }
+      ]
+    }
+  ],
+  "server": [
+    {
+      "type": "ack",
+      "intents": [
+        { "id": "i-1-0001", "status": "acked" }
+      ]
+    }
+  ]
+}

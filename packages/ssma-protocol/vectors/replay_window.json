@@ -1,0 +1,9 @@
+{
+  "name": "replay_window",
+  "client": [
+    { "type": "connect", "path": "/optimistic/ws?role=leader&cursor=0" }
+  ],
+  "server": [
+    { "type": "replay", "cursor": 1, "intents": [] }
+  ]
+}

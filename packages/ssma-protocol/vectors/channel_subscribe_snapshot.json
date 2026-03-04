@@ -1,0 +1,10 @@
+{
+  "name": "channel_subscribe_snapshot",
+  "client": [
+    { "type": "channel.subscribe", "channel": "global", "params": {} }
+  ],
+  "server": [
+    { "type": "channel.ack", "status": "ok", "channel": "global" },
+    { "type": "channel.snapshot", "channel": "global", "intents": [] }
+  ]
+}

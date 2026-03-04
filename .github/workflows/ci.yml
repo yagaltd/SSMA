@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run check:docs
+      - run: npm run test:conformance
+      - run: npm run test -- tests/backend-http-client.test.js tests/config-subprotocol.test.js tests/conformance-vectors.test.js tests/contract-sync.test.js
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust tests
+        working-directory: ssma-rust
+        run: cargo test -- --nocapture

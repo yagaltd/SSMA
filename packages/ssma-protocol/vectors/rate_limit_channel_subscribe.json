@@ -1,0 +1,11 @@
+{
+  "name": "rate_limit_channel_subscribe",
+  "client": [
+    { "type": "channel.subscribe", "channel": "global", "params": {} },
+    { "type": "channel.subscribe", "channel": "global", "params": {} }
+  ],
+  "server": [
+    { "type": "channel.ack", "status": "ok", "channel": "global" },
+    { "type": "channel.ack", "status": "error", "code": "RATE_LIMITED" }
+  ]
+}

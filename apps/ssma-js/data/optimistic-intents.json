@@ -1,0 +1,109 @@
+{
+  "nextSeq": 4,
+  "entries": [
+    {
+      "id": "3f8c0ab3-29b1-4016-8a06-5b9ae67bcf93",
+      "intent": "INTENT_CHECKOUT_SUBMIT",
+      "payload": {
+        "checkoutId": "demo-checkout",
+        "timestamp": 1765935874419
+      },
+      "meta": {
+        "clock": 1765935874420,
+        "reasons": [
+          "channel:global"
+        ],
+        "channels": [
+          "global"
+        ],
+        "conflicts": 0,
+        "undo": null,
+        "reducer": "checkout.orders",
+        "actionCreator": "checkout.submit",
+        "actor": "f4639a70-46b2-4f51-afec-6f62fcb646f5",
+        "crdt": {
+          "type": "lww-register",
+          "key": "checkout:demo-checkout",
+          "reducer": "checkout.orders",
+          "actor": "f4639a70-46b2-4f51-afec-6f62fcb646f5",
+          "timestamp": 1765935859806,
+          "value": {
+            "checkoutId": "demo-checkout",
+            "kind": "submission",
+            "submittedAt": 1765935874420
+          }
+        }
+      },
+      "site": "default",
+      "status": "acked",
+      "connectionId": "220f8f14-5100-4829-99db-f8a7c29c11e6",
+      "insertedAt": 1765936476010,
+      "updatedAt": 1765936476010,
+      "logSeq": 1
+    },
+    {
+      "id": "i-1-abcdefg",
+      "intent": "TODO_CREATE",
+      "payload": {
+        "id": "todo-1",
+        "title": "SSMA todo"
+      },
+      "meta": {
+        "clock": 1771735734092,
+        "reasons": [
+          "replay",
+          "channel:global"
+        ],
+        "channels": [
+          "global"
+        ],
+        "actor": "fe059592-2145-4409-b1b3-cb731e4737ac"
+      },
+      "site": "default",
+      "status": "acked",
+      "connectionId": "fe059592-2145-4409-b1b3-cb731e4737ac",
+      "insertedAt": 1771735734115,
+      "updatedAt": 1771735734122,
+      "logSeq": 2,
+      "backend": {
+        "backend": {
+          "code": null,
+          "message": null,
+          "updatedAt": 1771735734122
+        }
+      }
+    },
+    {
+      "id": "i-2-abcdefg",
+      "intent": "TODO_CREATE",
+      "payload": {
+        "id": "todo-2",
+        "title": "snapshot seed"
+      },
+      "meta": {
+        "clock": 1771735739051,
+        "reasons": [
+          "replay",
+          "channel:global"
+        ],
+        "channels": [
+          "global"
+        ],
+        "actor": "28c4d9e5-bce2-476e-8d8d-cfbca4380fce"
+      },
+      "site": "default",
+      "status": "acked",
+      "connectionId": "28c4d9e5-bce2-476e-8d8d-cfbca4380fce",
+      "insertedAt": 1771735739051,
+      "updatedAt": 1771735739054,
+      "logSeq": 3,
+      "backend": {
+        "backend": {
+          "code": null,
+          "message": null,
+          "updatedAt": 1771735739054
+        }
+      }
+    }
+  ]
+}

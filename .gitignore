@@ -1,0 +1,13 @@
+node_modules/
+apps/ssma-js/node_modules/
+apps/ssma-rust/target/
+apps/ssma-js/logs/
+.old/
+
+.env
+.env.local
+.env.*.local
+
+*.log
+.DS_Store
+Thumbs.db

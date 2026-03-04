@@ -1,0 +1,19 @@
+{
+  "name": "ssma-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/ssma-js"
+  ],
+  "scripts": {
+    "dev:js": "npm --prefix apps/ssma-js run dev",
+    "start:js": "npm --prefix apps/ssma-js run start",
+    "test:js": "npm --prefix apps/ssma-js run test",
+    "test:conformance": "npm --prefix apps/ssma-js run test:conformance",
+    "run:e2e": "npm --prefix apps/ssma-js run run:e2e",
+    "sync:contracts": "npm --prefix apps/ssma-js run sync:contracts",
+    "verify:contracts": "npm --prefix apps/ssma-js run verify:contracts",
+    "check:security": "npm --prefix apps/ssma-js run check:security",
+    "check:docs": "npm --prefix apps/ssma-js run check:docs",
+    "test:rust": "cd apps/ssma-rust && cargo test -- --nocapture"
+  }
+}

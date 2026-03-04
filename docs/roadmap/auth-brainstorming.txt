@@ -1,0 +1,367 @@
+Below is a **practical, high-level, step-by-step roadmap** you can follow to add authentication to a **headless + vanilla JS frontend**, starting from zero. This reflects **industry best practices**, security sequencing, and what’s easiest to **build, test, and evolve** without rework.
+
+I’ll structure this as **incremental phases**, explain **what to implement**, **why the order matters**, and **what to test at each step**.
+
+---
+
+# Big Picture (Before Steps)
+
+Authentication is **not one feature**, it’s a **system** made of:
+
+* **Identity** (who is the user?)
+* **Authentication** (prove identity)
+* **Authorization** (what can they do?)
+* **Session management** (stay logged in)
+* **Compliance** (GDPR, consent, logs)
+* **Observability** (logs, analytics, security events)
+
+👉 **Golden rule**:
+
+> *Design identity & authorization **before** choosing JWT, OAuth, encryption details.*
+
+## Current Status (Dec 2025)
+
+| Area | Status | Notes |
+|------|--------|-------|
+| User model & role matrix | ✅ Completed | `UserStore` persists `id,email,passwordHash,role,status,timestamps`; RBAC hierarchy (`guest → user → staff → admin → system`) enforced backend + channel access. |
+| Auth flows | ✅ Completed | Email/password registration, login/logout, `/auth/me`, argon2id hashing, `jose` JWTs issued + verified, HTTP-only cookie sessions, CSMA client wired to role helpers. |
+| Transport enforcement | ✅ Completed | WebSocket/SSE gateway parses session cookies, injects user context into channel registry, rate limits rework + channel subscribe, logs audit events. |
+| Dev/ops visibility | ✅ Completed | `LogService.ingestServerEvent` captures auth + optimistic events, admin APIs expose channel/intents state, CSMA DevTools surfaces channel/server events. |
+| Future enhancements | ⏳ Planned | Password reset & verification, OAuth/SSO (oauth4webapi), admin user management UI/CLI, MFA, consent flows, advanced analytics. |
+| Out-of-scope (for now) | 🚫 Not planned | Social login without core auth, storing tokens in localStorage, over-granular permissions beyond role gates. |
+
+
+# Phase 0 — Foundations (Do This First)
+
+### 0.1 Define your authentication scope
+
+Answer these **before writing anything**:
+
+* Is this **B2C**, **B2B**, or **internal**?
+* Single app or **multiple frontends**?
+* Will you need **mobile apps later**?
+* Are admins separate users or same users with roles?
+
+📌 **Deliverable**: Auth requirements document (1–2 pages)
+
+---
+
+### 0.2 Define your user model (VERY IMPORTANT)
+
+Start simple:
+
+**Core user fields**
+
+* `id`
+* `email`
+* `password_hash` (later)
+* `status` (active, pending, disabled)
+* `created_at`, `last_login_at`
+
+**DO NOT add**:
+
+* OAuth yet
+* JWT fields
+* GDPR flags (yet)
+
+📌 This avoids schema rewrites later.
+
+---
+
+# Phase 1 — Authorization Model (Before Authentication)
+
+> Authentication without authorization design leads to chaos.
+
+### 1.1 Define roles & permissions (high-level)
+
+Start with **roles**, not fine-grained permissions.
+
+Example:
+
+* `guest` (not authenticated)
+* `user` (authenticated)
+* `staff`
+* `admin`
+
+⚠️ Avoid overengineering early.
+
+Later you can add:
+
+* Permission-based access (`can_edit_post`)
+* Group-based (`grpd`) access
+
+📌 **Deliverable**:
+
+| Role  | Capabilities            |
+| ----- | ----------------------- |
+| Guest | Read public content     |
+| User  | Read + personal actions |
+| Staff | Moderate                |
+| Admin | Full access             |
+
+---
+
+### 1.2 Decide authorization enforcement points
+
+* **Backend is the source of truth**
+* Frontend only **hides UI**, never enforces security
+
+📌 **Rule**:
+
+> Every protected API route checks role/permissions
+
+---
+
+# Phase 2 — Basic Authentication (Email + Password)
+
+This is your **core identity layer**.
+
+### 2.1 Implement email/password authentication
+
+**Order**
+
+1. User registration
+2. Email verification (optional but recommended)
+3. Login
+4. Logout
+
+**Best practices**
+
+* Hash passwords (bcrypt/argon2)
+* Never store plain passwords
+* Rate limit login attempts
+
+📌 Test:
+
+* Can create user
+* Wrong password fails
+* Locked user cannot log in
+
+---
+
+### 2.2 Session strategy decision (CRITICAL)
+
+You must choose **ONE primary strategy**.
+
+### Option A (Recommended for headless JS)
+
+**HTTP-only cookies + session or JWT**
+
+* Cookie:
+
+  * `HttpOnly`
+  * `Secure`
+  * `SameSite=Lax/Strict`
+* Token stored **server-side or stateless**
+
+### Option B
+
+**JWT in memory (NOT localStorage)**
+
+📌 **Best practice 2025**:
+
+> **HTTP-only cookies > JWT in localStorage**
+
+---
+
+# Phase 3 — JWT & Token Design (After Basic Auth Works)
+
+> JWT is a transport mechanism, not authentication itself.
+
+### 3.1 Decide what JWT contains
+
+Keep it **minimal**:
+
+* `sub` (user id)
+* `role`
+* `iat`, `exp`
+
+🚫 Do NOT store:
+
+* Email
+* Permissions lists
+* Personal data
+
+---
+
+### 3.2 Token lifecycle
+
+* Short-lived access token (5–15 min)
+* Refresh token (longer, rotated)
+* Invalidate on logout
+
+📌 Test:
+
+* Expired token rejected
+* Refresh works
+* Logout revokes access
+
+---
+
+# Phase 4 — Frontend Integration (Vanilla JS)
+
+### 4.1 Authentication state management
+
+You need:
+
+* `isAuthenticated`
+* `userRole`
+* `loadingAuthState`
+
+📌 Rule:
+
+> Frontend never trusts itself — always sync from backend.
+
+---
+
+### 4.2 Route & UI protection
+
+* Public routes
+* Auth-only routes
+* Role-based UI hiding
+
+📌 Test:
+
+* Direct API call blocked
+* UI adapts to role
+
+---
+
+# Phase 5 — GDPR & Privacy (After Identity Exists)
+
+> GDPR depends on identity — don’t do it earlier.
+
+### 5.1 Consent management
+
+Store:
+
+* `terms_accepted_at`
+* `privacy_accepted_at`
+* `marketing_opt_in`
+
+📌 Rules:
+
+* No optional tracking before consent
+* Consent versioning (v1, v2…)
+
+---
+
+### 5.2 Data subject rights
+
+Design (even if not fully implemented yet):
+
+* Export user data
+* Delete account
+* Anonymization
+
+---
+
+# Phase 6 — Logging, Security & Analytics
+
+### 6.1 Security & audit logs (Backend)
+
+Log:
+
+* Login success/failure
+* Password reset
+* Role changes
+* Token refresh
+
+📌 These are **not analytics**
+
+---
+
+### 6.2 Web analytics (Frontend)
+
+* Anonymous tracking first
+* Link to user **after consent**
+* Avoid PII in analytics
+
+---
+
+# Phase 7 — Password Recovery & Account Security
+
+### 7.1 Password reset flow
+
+* Email with time-limited token
+* One-time use
+* Invalidate all sessions after reset
+
+---
+
+### 7.2 Additional protections
+
+* Rate limiting
+* CAPTCHA (optional)
+* Account lockout policies
+
+---
+
+# Phase 8 — OAuth / Social Login (Optional, Last)
+
+> OAuth is an **extension**, not a foundation.
+
+Add when:
+
+* Core auth is stable
+* User model supports multiple identities
+
+### 8.1 OAuth linking strategy
+
+* One user ↔ many auth providers
+* Email collision handling
+* Provider unlinking
+
+📌 OAuth does NOT replace password auth (initially)
+
+---
+
+# Phase 9 — Encryption & Advanced Security (Last)
+
+### 9.1 Encryption at rest
+
+* Encrypt sensitive fields (if any)
+* Use KMS or env-based keys
+
+### 9.2 Advanced security
+
+* Device tracking
+* Suspicious login detection
+* MFA (if needed)
+
+---
+
+# Recommended Implementation Order (TL;DR)
+
+1. **User model**
+2. **Roles & authorization**
+3. **Email/password auth**
+4. **Session or JWT**
+5. **Frontend auth state**
+6. **GDPR consent**
+7. **Logs & analytics**
+8. **Password reset**
+9. **OAuth**
+10. **Advanced encryption & MFA**
+
+---
+
+# Final Advice (Hard-Won Lessons)
+
+* 🔥 **Don’t start with JWT**
+* 🔥 **Don’t store tokens in localStorage**
+* 🔥 **Don’t overbuild roles early**
+* 🔥 **Don’t mix analytics & audit logs**
+* 🔥 **Frontend auth is UX, backend auth is security**
+
+---
+
+If you want, next I can:
+
+* Draw an **auth architecture diagram**
+* Give a **checklist per phase**
+* Compare **JWT vs session cookies**
+* Tailor this to **SPA + API + CDN** setup
+
+Just tell me 👍
+

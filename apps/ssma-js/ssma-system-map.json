@@ -1,0 +1,49 @@
+{
+  "generated": "2025-12-15T06:36:55.434Z",
+  "project": {
+    "name": "ssma",
+    "version": "1.0.0",
+    "description": ""
+  },
+  "architecture": {
+    "pattern": "SSMA",
+    "portabilityTargets": [
+      "Node",
+      "Bun",
+      "Cloudflare Workers",
+      "MV3"
+    ],
+    "eventBus": true
+  },
+  "services": [
+    {
+      "name": "auth",
+      "files": [
+        "AuthService.js"
+      ],
+      "routes": 0,
+      "controllers": 0
+    }
+  ],
+  "contracts": [
+    "auth.json"
+  ],
+  "scripts": [
+    "dev",
+    "start",
+    "sync:contracts",
+    "generate:map",
+    "check:security",
+    "seed:demo",
+    "run:e2e",
+    "deploy:node"
+  ],
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "argon2": "^0.44.0",
+    "dotenv": "^17.2.3",
+    "jsonwebtoken": "^9.0.3",
+    "uuid": "^13.0.0"
+  }
+}

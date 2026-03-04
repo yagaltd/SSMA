@@ -1,0 +1,9 @@
+{
+  "name": "ws_handshake",
+  "client": [
+    { "type": "connect", "path": "/optimistic/ws?role=leader&site=default&subprotocol=1.0.0" }
+  ],
+  "server": [
+    { "type": "hello", "subprotocol": "1.0.0" }
+  ]
+}
