@@ -15,7 +15,7 @@ This repository contains both runtime implementations and one shared protocol pa
 - `apps/ssma-rust`: Rust runtime implementation
 - `packages/ssma-protocol`: shared contracts and golden vectors
 - `docs`: architecture, protocol, security, operations, testing docs
-- `tooling`: repository-level tools/scripts
+- `scripts`: repository-level tools/scripts
 
 ## How It Works
 
@@ -69,7 +69,7 @@ Scaffold first, then run runtime commands in generated project:
 ```bash
 csma-ssma
 cd <your-project>
-npm run dev:ssma
+npm run dev:js
 ```
 
 ## Template IDs (CLI Source of Truth)

@@ -14,7 +14,14 @@
   "sourcePaths": [
     "apps/ssma-rust",
     "packages/ssma-protocol",
-    "docs",
+    "docs/index.md",
+    "docs/README.md",
+    "docs/architecture",
+    "docs/protocol",
+    "docs/security",
+    "docs/operations",
+    "docs/testing",
+    "docs/api",
     "README.md",
     "package.json"
   ],

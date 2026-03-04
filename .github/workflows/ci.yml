@@ -13,10 +13,11 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
+          cache-dependency-path: apps/ssma-js/package-lock.json
+      - run: npm --prefix apps/ssma-js ci
       - run: npm run check:docs
       - run: npm run test:conformance
-      - run: npm run test -- tests/backend-http-client.test.js tests/config-subprotocol.test.js tests/conformance-vectors.test.js tests/contract-sync.test.js
+      - run: npm --prefix apps/ssma-js run test -- tests/backend-http-client.test.js tests/config-subprotocol.test.js tests/conformance-vectors.test.js tests/contract-sync.test.js
 
   rust:
     runs-on: ubuntu-latest
@@ -24,5 +25,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Rust tests
-        working-directory: ssma-rust
+        working-directory: apps/ssma-rust
         run: cargo test -- --nocapture
