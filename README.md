@@ -72,6 +72,26 @@ cd <your-project>
 npm run dev:ssma
 ```
 
+## Template IDs (CLI Source of Truth)
+
+The CLI should discover templates from `templates/*/template.manifest.json`.
+
+- `ssma-js-gateway`: SSMA JS runtime template
+- `ssma-rust-gateway`: SSMA Rust runtime template
+
+Validate template metadata:
+
+```bash
+npm run validate:templates
+```
+
+## Repository Policy
+
+This repository is template-first source.
+
+- Keep runtime source, protocol contracts, docs source, and minimal examples.
+- Do not commit generated/runtime artifacts (`node_modules`, Rust `target`, logs, `.old/`).
+
 ## Validation Commands
 
 From repo root:

@@ -14,6 +14,7 @@
     "verify:contracts": "npm --prefix apps/ssma-js run verify:contracts",
     "check:security": "npm --prefix apps/ssma-js run check:security",
     "check:docs": "npm --prefix apps/ssma-js run check:docs",
-    "test:rust": "cd apps/ssma-rust && cargo test -- --nocapture"
+    "test:rust": "cd apps/ssma-rust && cargo test -- --nocapture",
+    "validate:templates": "node scripts/validate-templates.mjs"
   }
 }

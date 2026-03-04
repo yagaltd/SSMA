@@ -1,0 +1,28 @@
+{
+  "templateId": "ssma-rust-gateway",
+  "engine": "ssma",
+  "runtime": "rust",
+  "version": "1.0.0",
+  "schemaVersion": "1.0.0",
+  "description": "SSMA Rust gateway template.",
+  "requiredFiles": [
+    "apps/ssma-rust/Cargo.toml",
+    "apps/ssma-rust/src/main.rs",
+    "apps/ssma-rust/src/lib.rs",
+    "packages/ssma-protocol/contracts/optimistic.json"
+  ],
+  "sourcePaths": [
+    "apps/ssma-rust",
+    "packages/ssma-protocol",
+    "docs",
+    "README.md",
+    "package.json"
+  ],
+  "compat": {
+    "recommendedCli": ">=0.1.0"
+  },
+  "postScaffoldHints": [
+    "cd apps/ssma-rust",
+    "cargo run"
+  ]
+}

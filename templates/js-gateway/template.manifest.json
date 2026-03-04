@@ -1,0 +1,28 @@
+{
+  "templateId": "ssma-js-gateway",
+  "engine": "ssma",
+  "runtime": "node",
+  "version": "1.0.0",
+  "schemaVersion": "1.0.0",
+  "description": "SSMA JavaScript gateway template.",
+  "requiredFiles": [
+    "apps/ssma-js/package.json",
+    "apps/ssma-js/src/index.js",
+    "apps/ssma-js/src/app.js",
+    "packages/ssma-protocol/contracts/optimistic.json"
+  ],
+  "sourcePaths": [
+    "apps/ssma-js",
+    "packages/ssma-protocol",
+    "docs",
+    "README.md",
+    "package.json"
+  ],
+  "compat": {
+    "recommendedCli": ">=0.1.0"
+  },
+  "postScaffoldHints": [
+    "npm --prefix apps/ssma-js install",
+    "npm --prefix apps/ssma-js run dev"
+  ]
+}
