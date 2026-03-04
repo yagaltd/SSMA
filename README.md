@@ -1,107 +1,51 @@
-# SSMA Monorepo
+# SSMA (Stable State Middleware Architecture)
 
-SSMA (Stable State Middleware Architecture) is a gateway-focused backend architecture:
+SSMA is a **portable backend-agnostic realtime gateway** designed for [CSMA](https://github.com/yagaltd/CSMA) frontend clients.
 
-- It is the sync authority for optimistic client traffic.
-- It validates protocol contracts and enforces security policy.
-- It forwards accepted writes/queries to a backend adapter.
-- It emits WS/SSE acknowledgements and invalidations to clients.
-
-This repository contains both runtime implementations and one shared protocol package.
-
-## Repository Structure
-
-- `apps/ssma-js`: Node.js runtime implementation
-- `apps/ssma-rust`: Rust runtime implementation
-- `packages/ssma-protocol`: shared contracts and golden vectors
-- `docs`: architecture, protocol, security, operations, testing docs
-- `scripts`: repository-level tools/scripts
-
-## How It Works
-
-1. Client sends `intent.batch` (WS) or a supported HTTP operation.
-2. Gateway validates schema and security policy.
-3. Gateway persists intent and enforces idempotency/replay semantics.
-4. Gateway forwards fresh intents to backend adapter.
-5. Gateway emits ACK + invalidation events to WS/SSE clients.
-
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant G as SSMA Gateway
-  participant P as Shared Protocol
-  participant B as Backend
-  participant S as Subscribers
-
-  C->>G: WS intent.batch
-  G->>P: Validate contract
-  P-->>G: Valid/Invalid
-  G->>G: Auth/RBAC/Rate limit + persist
-  G->>B: apply_intents (fresh only)
-  B-->>G: status + events
-  G-->>C: ack (id/status/logSeq)
-  G-->>S: invalidate / island.invalidate
-```
+**Core features:**
+- **Realtime sync**: WebSocket + SSE for optimistic updates and invalidations
+- **CRDT support**: LWW registers, G-Counters, PN-Counters for conflict resolution
+- **Backend-agnostic**: plug any backend via adapter interface
+- **Pluggable storage**: JSON file (default) or SQLite
 
 ## Quick Start
 
-### Use Without CLI (Current Recommended Path)
+Scaffold a new project with [csma-ssma-cli](https://github.com/yagaltd/csma-ssma-cli).
 
-Run from this monorepo directly.
-
-### JS Runtime
-
+Or run directly from this monorepo:
 ```bash
-npm --prefix apps/ssma-js run dev
+npm run dev:js    # JS runtime
+cargo run         # Rust runtime (from apps/ssma-rust)
 ```
 
-### Rust Runtime
+## Repository Structure
+
+| Path | Description |
+|------|-------------|
+| `apps/ssma-js` | Node.js runtime |
+| `apps/ssma-rust` | Rust runtime |
+| `packages/ssma-protocol` | Shared contracts & vectors |
+| `docs/` | Architecture & guides |
+
+## Templates
+
+| Template ID | Description |
+|-------------|-------------|
+| `ssma-js-gateway` | JS runtime |
+| `ssma-rust-gateway` | Rust runtime |
+
+## Development
 
 ```bash
-cd apps/ssma-rust
-cargo run
+npm run dev:js              # JS dev server
+npm run test:js             # JS tests
+npm run test:conformance    # Protocol conformance
+npm run test:rust           # Rust tests
+npm run validate:templates  # Validate template manifests
 ```
 
-### Use With CLI (When `csma-ssma-cli` is available)
+For architecture details, see [docs/](docs/).
 
-Scaffold first, then run runtime commands in generated project:
+## Acknowledgements
 
-```bash
-csma-ssma
-cd <your-project>
-npm run dev:js
-```
-
-## Template IDs (CLI Source of Truth)
-
-The CLI should discover templates from `templates/*/template.manifest.json`.
-
-- `ssma-js-gateway`: SSMA JS runtime template
-- `ssma-rust-gateway`: SSMA Rust runtime template
-
-Validate template metadata:
-
-```bash
-npm run validate:templates
-```
-
-## Repository Policy
-
-This repository is template-first source.
-
-- Keep runtime source, protocol contracts, docs source, and minimal examples.
-- Do not commit generated/runtime artifacts (`node_modules`, Rust `target`, logs, `.old/`).
-
-## Validation Commands
-
-From repo root:
-
-- JS tests: `npm run test:js`
-- JS conformance vectors: `npm run test:conformance`
-- Docs link check: `npm run check:docs`
-- Rust tests: `npm run test:rust`
-
-Direct commands:
-
-- JS app: `npm --prefix apps/ssma-js run <script>`
-- Rust app: `cd apps/ssma-rust && cargo <command>`
+* Inspired by [Logux](https://github.com/logux)
