@@ -27,13 +27,14 @@ Gateway checks `subprotocol` (major version must match `config.optimistic.subpro
 {
   "type": "hello",
   "role": "leader",
+  "authRole": "user",
   "connectionId": "uuid",
   "serverTime": 1734370000,
   "subprotocol": "1.0.0"
 }
 ```
 
-Leaders can then send `intent.batch` payloads; followers ignore writes and rely on SSE only.
+Leaders can then send `intent.batch` payloads; followers ignore writes and rely on SSE or channel fanout only. If no valid session cookie is present, the connection still succeeds but `authRole` falls back to `guest`.
 
 ### Intent schema & validation
 
@@ -50,6 +51,12 @@ When a batch passes validation:
 3. `OptimisticEventHub` publishes `event: invalidate` SSE messages so follower tabs refresh.
 4. Pending reasons are cleared (`releaseReason(id, 'pending')`); replay reasons expire automatically past `config.optimistic.replayWindowMs`.
 
+Channel subscriptions use a parallel path:
+
+1. `channel.subscribe` returns `channel.ack` and then `channel.snapshot`.
+2. `channel.snapshot`, `channel.replay`, and `channel.invalidate` preserve the original subscription `params`.
+3. Each invalidation frame targets one `channel`; fanout no longer relies on a `channels[]` aggregate payload.
+
 ### Replay
 
 - On websocket connect **and** SSE connect (`/optimistic/events`), SSMA sends `{ type: 'replay', intents: [...] }` containing all entries newer than `replayWindowMs` (default 5 minutes).
@@ -57,20 +64,20 @@ When a batch passes validation:
 
 ## Authentication & RBAC
 
-SSMA now enforces authenticated sessions everywhere:
+SSMA uses one session-token contract everywhere:
 
 - `AuthService` issues `argon2id`-backed credentials with `jose` JWTs, exposed via `/auth/register`, `/auth/login`, `/auth/logout`, `/auth/me`.
 - `authMiddleware` parses the HTTP cookie (`SSMA_AUTH_COOKIE`, default `ssma_session`) and injects `ctx.state.user` for every route.
-- `SyncGateway` inspects the same cookie during WebSocket upgrade, attaching `{ user, role, site }` context to each connection so channel access hooks have full RBAC data.
+- `SyncGateway` inspects the same cookie during WebSocket upgrade, verifies the token, and attaches `{ user, role, site }` context to each connection so channel access hooks have full RBAC data.
 - `ChannelRegistry` delegates every subscription through `access(params, { connection })` handlers, so sensitive channels (e.g. `ops.audit`) can require `staff` or `system` roles before replay snapshots are sent.
 - HTTP routes (`/optimistic/rework`, `/optimistic/undo`, `/admin/optimistic/*`) gate access through role helpers, ensuring only privileged operators can rework or inspect intents.
-- **Guests vs. WS** – there is intentionally no unauthenticated WebSocket role. If `/auth/me` returns 401, `/optimistic/ws` will also reject the handshake. Frontends should either log in (even as a constrained guest user) or disable optimistic sync for those flows (`allowGuestCheckout: false` on the CSMA side).
-- **SSE only for read-only followers** – `/optimistic/events` stays open to guests so secondary tabs can still receive invalidations. It never delivers ACKs, so anonymous users will see their intents remain in `pending` if they try to publish without a session.
+- **Guests vs. WS** – unauthenticated clients are allowed to connect and operate as `guest`. Protected channels and island invalidations still enforce RBAC, and writes can still be blocked when `SSMA_OPTIMISTIC_REQUIRE_AUTH_WRITES=true`.
+- **SSE and RBAC** – `/optimistic/events` stays open to guests, but island invalidations are filtered by role and optional `?islands=a,b` scoping before delivery. SSE never delivers ACKs, so anonymous users will still see pending intents if they try to publish while writes require auth.
 
 ## Rate limiting & transport hardening
 
 - **HTTP rework/undo**: the global middleware now applies an auth-aware limiter (`SSMA_OPTIMISTIC_REWORK_MAX` per `SSMA_OPTIMISTIC_REWORK_WINDOW_MS`) keyed by `userId:role`, logging `OPTIMISTIC_REWORK_RATE_LIMIT` when tripped.
-- **Channel subscriptions**: `SyncGateway` tracks per-connection bursts (defaults: 8 subscribes per 10s, configurable via `SSMA_OPTIMISTIC_CHANNEL_*`). When exceeded, the client receives `{ type: 'channel.ack', code: 'RATE_LIMITED', retryAfterMs }` and the event is logged.
+- **Channel subscriptions**: `SyncGateway` tracks per-connection bursts (defaults: 8 subscribes per 10s, configurable via `SSMA_OPTIMISTIC_CHANNEL_*`). When exceeded, the client receives `{ type: 'channel.ack', status: 'error', code: 'RATE_LIMITED', retryAfterMs }` and the event is logged.
 - All rate-limit hits, access denials, and server-generated rework/undo events flow through `LogService.ingestServerEvent`, so operators have centralized telemetry.
 
 ## Observability & admin tooling
@@ -98,7 +105,7 @@ Adapter selection is seamless—both satisfy the `IntentStoreAdapter` contract (
 
 ## Channel protocol parity
 
-- `ChannelRegistry` specs now accept `filter`, `resend`, and custom `commands` handlers. Subscriptions remember per-client filter state, so snapshots/invalidations are scoped (and resumable) per connection.
+- `ChannelRegistry` specs now accept `filter`, `resend`, and custom `commands` handlers. Subscriptions remember per-client filter state, so snapshots/invalidations are scoped and resumable per connection and per `params`.
 - `channel.command` messages (filter updates, resends, or bespoke commands) are round-tripped through `SyncGateway`, returning structured `{ type: 'channel.command', status }` responses plus server-initiated `channel.replay` payloads when resends succeed.
 - Typed `channel.close` events (e.g., `ACCESS_DENIED`, `CLIENT_UNSUBSCRIBED`, `CONNECTION_CLOSED`) let CSMA differentiate between voluntary unsubscribes, auth changes, and server-initiated shutdowns, and DevTools displays the lifecycle events.
 - Rate limiting applies to command bursts the same way it does for subscribe/unsubscribe, and all channel telemetry flows through `LogService` for observability.

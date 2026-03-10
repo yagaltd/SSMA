@@ -12,6 +12,10 @@ Write behavior:
 Shared transport expectations:
 
 - handshake emits `hello` then `replay`
+- `hello` includes `connectionId` and the resolved `authRole`
 - major-version subprotocol check is enforced
 - invalid payloads return structured error frames
 - channel subscribe flow emits `channel.ack` and `channel.snapshot`
+- `channel.snapshot`, `channel.replay`, and `channel.invalidate` preserve the subscription `params`
+- `channel.invalidate` fans out one `channel` at a time instead of a `channels[]` aggregate
+- SSE island invalidations are filtered by RBAC and optional `?islands=` scoping
