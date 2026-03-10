@@ -1,19 +1,10 @@
-# SSMA Agent Guide
-
-Use this file as the repo-specific operating guide for AI agents working in this SSMA template.
-
-## What SSMA Owns
-
-SSMA is a backend-agnostic realtime gateway.
-It owns:
+SSMA is a backend-agnostic realtime gateway. It owns:
 - WebSocket and SSE transport
 - replay and invalidation fanout
 - auth and RBAC enforcement
 - optimistic intent persistence
 - backend adapter calls
 - protocol validation and conformance
-
-SSMA does not replace the business backend.
 
 ## Runtime Map
 
@@ -138,4 +129,3 @@ Before changing behavior:
 
 Do not silently drift JS and Rust apart.
 Do not add a new contract shape in only one runtime.
-If a nested repo such as `.CSMA` is present, treat it as a separate git repository unless the task explicitly spans both repos.

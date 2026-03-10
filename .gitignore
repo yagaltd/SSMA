@@ -7,6 +7,10 @@ apps/ssma-js/logs/
 .env
 .env.local
 .env.*.local
+.CSMA/
+ssma_tauri.md
+ssma_backend_starter.md
+roadmap.md
 
 *.log
 .DS_Store
