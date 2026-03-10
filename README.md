@@ -1,4 +1,4 @@
-# SSMA
+# SSMA (Server-Side Microservices Architecture)
 
 SSMA is a backend-agnostic realtime gateway implemented in both JavaScript and Rust.
 
