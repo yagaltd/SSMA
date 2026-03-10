@@ -20,6 +20,35 @@ import { IslandInvalidationService } from "./services/island-invalidations/Islan
 import { HybridMonitor } from "./services/monitoring/HybridMonitor.js";
 import { BackendHttpClient } from "./backend/BackendHttpClient.js";
 
+function attachGracefulClose(server, syncGateway) {
+  const originalClose = server.close.bind(server);
+  let closePromise = null;
+
+  server.closeGracefully = async () => {
+    if (!closePromise) {
+      closePromise = Promise.resolve(syncGateway?.destroy?.()).finally(
+        () =>
+          new Promise((resolve) => {
+            originalClose(() => resolve());
+          }),
+      );
+    }
+    return closePromise;
+  };
+
+  server.close = (callback) => {
+    server
+      .closeGracefully()
+      .then(() => callback?.())
+      .catch((error) => {
+        process.nextTick(() => {
+          throw error;
+        });
+      });
+    return server;
+  };
+}
+
 export function createServer(config) {
   const kernel = createNodeKernel(config);
   const logService = new LogService({
@@ -164,6 +193,7 @@ export function createServer(config) {
   });
 
   syncGateway.start();
+  attachGracefulClose(kernel.server, syncGateway);
 
   const islandInvalidationService = new IslandInvalidationService({
     eventHub: optimisticHub,

@@ -3,12 +3,15 @@ use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
+use jsonwebtoken::{encode, EncodingKey, Header};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Clone, Default)]
@@ -128,8 +131,16 @@ async fn ws_wait_for(
     ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     ty: &str,
 ) -> Result<Value> {
+    ws_wait_for_with_timeout(ws, ty, Duration::from_secs(6)).await
+}
+
+async fn ws_wait_for_with_timeout(
+    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ty: &str,
+    wait_for: Duration,
+) -> Result<Value> {
     let mut seen = Vec::new();
-    let val = timeout(Duration::from_secs(6), async {
+    let val = timeout(wait_for, async {
         while let Some(msg) = ws.next().await {
             let msg = msg?;
             if let Message::Text(text) = msg {
@@ -150,13 +161,29 @@ async fn ws_wait_for(
 }
 
 async fn sse_wait_for(base: &str, wanted: &[&str]) -> Result<Value> {
-    let response = reqwest::Client::new()
-        .get(format!("http://{}/optimistic/events", base))
-        .send()
-        .await?;
+    sse_wait_for_with_headers_timeout(base, wanted, None, None, Duration::from_secs(8)).await
+}
+
+async fn sse_wait_for_with_headers_timeout(
+    base: &str,
+    wanted: &[&str],
+    query: Option<&str>,
+    cookie: Option<&str>,
+    wait_for: Duration,
+) -> Result<Value> {
+    let mut request = reqwest::Client::new()
+        .get(format!(
+            "http://{}/optimistic/events{}",
+            base,
+            query.unwrap_or("")
+        ));
+    if let Some(value) = cookie {
+        request = request.header("Cookie", value);
+    }
+    let response = request.send().await?;
     let mut stream = response.bytes_stream();
     let mut buf = String::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let deadline = tokio::time::Instant::now() + wait_for;
 
     loop {
         if tokio::time::Instant::now() >= deadline {
@@ -186,6 +213,38 @@ async fn sse_wait_for(base: &str, wanted: &[&str]) -> Result<Value> {
         }
     }
     anyhow::bail!("SSE event not observed")
+}
+
+#[derive(Serialize)]
+struct TestClaims<'a> {
+    sub: &'a str,
+    role: &'a str,
+    exp: usize,
+    iat: usize,
+}
+
+fn issue_session_cookie(secret: &str, user_id: &str, role: &str) -> Result<String> {
+    let now = (now_millis() / 1000) as usize;
+    let token = encode(
+        &Header::default(),
+        &TestClaims {
+            sub: user_id,
+            role,
+            exp: now + 3600,
+            iat: now,
+        },
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )?;
+    Ok(format!("ssma_session={}", token))
+}
+
+async fn connect_with_cookie(url: String, cookie: Option<&str>) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>> {
+    let mut request = url.into_client_request()?;
+    if let Some(value) = cookie {
+        request.headers_mut().insert("Cookie", value.parse()?);
+    }
+    let (ws, _) = connect_async(request).await?;
+    Ok(ws)
 }
 
 #[tokio::test]
@@ -290,13 +349,15 @@ async fn scenarios_a_to_f() -> Result<()> {
 
     // E channel snapshot
     ws.send(Message::Text(
-        json!({ "type": "channel.subscribe", "channel": "global", "params": {} }).to_string(),
+        json!({ "type": "channel.subscribe", "channel": "global", "params": { "scope": "all" } }).to_string(),
     ))
     .await?;
     let sub_ack = ws_wait_for(&mut ws, "channel.ack").await?;
     assert_eq!(sub_ack["status"], "ok");
+    assert_eq!(sub_ack["params"], json!({ "scope": "all" }));
     let snapshot = ws_wait_for(&mut ws, "channel.snapshot").await?;
     assert_eq!(snapshot["channel"], "global");
+    assert_eq!(snapshot["params"], json!({ "scope": "all" }));
 
     // channel.invalidate fanout for subscribed channel
     ws.send(Message::Text(
@@ -314,6 +375,8 @@ async fn scenarios_a_to_f() -> Result<()> {
     let _ = ws_wait_for(&mut ws, "ack").await?;
     let invalidate = ws_wait_for(&mut ws, "channel.invalidate").await?;
     assert_eq!(invalidate["type"], "channel.invalidate");
+    assert_eq!(invalidate["channel"], "global");
+    assert_eq!(invalidate["params"], json!({ "scope": "all" }));
 
     // observability endpoint
     let gateway_metrics = reqwest::get(format!("http://{}/optimistic/metrics", gateway_base))
@@ -350,6 +413,135 @@ async fn scenarios_a_to_f() -> Result<()> {
 
     rbac_gateway_handle.abort();
     auth_gateway_handle.abort();
+    gateway_handle.abort();
+    backend_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn jwt_auth_controls_protected_channels_and_island_invalidations() -> Result<()> {
+    let (backend_base, backend_handle) = spawn_toy_backend().await?;
+    let jwt_secret = "test-secret";
+    let (gateway_base, gateway_handle) =
+        spawn_gateway_with(backend_base, false, |config| {
+            config.auth_jwt_secret = jwt_secret.to_string();
+            config.protected_channels = vec!["ops.audit".to_string()];
+            config.protected_channel_min_role = "staff".to_string();
+        })
+        .await?;
+
+    let guest_url = format!(
+        "ws://{}/optimistic/ws?role=follower&site=default&subprotocol=1.0.0",
+        gateway_base
+    );
+    let mut guest_ws = connect_with_cookie(guest_url, None).await?;
+    let guest_hello = ws_wait_for(&mut guest_ws, "hello").await?;
+    assert_eq!(guest_hello["authRole"], "guest");
+    let _ = ws_wait_for(&mut guest_ws, "replay").await?;
+    guest_ws
+        .send(Message::Text(
+            json!({
+                "type": "channel.subscribe",
+                "channel": "ops.audit",
+                "params": { "scope": "secure" }
+            })
+            .to_string(),
+        ))
+        .await?;
+    let guest_ack = ws_wait_for(&mut guest_ws, "channel.ack").await?;
+    assert_eq!(guest_ack["status"], "error");
+    assert_eq!(guest_ack["code"], "ACCESS_DENIED");
+    assert_eq!(guest_ack["params"], json!({ "scope": "secure" }));
+    let guest_close = ws_wait_for(&mut guest_ws, "channel.close").await?;
+    assert_eq!(guest_close["code"], "ACCESS_DENIED");
+
+    let staff_cookie = issue_session_cookie(jwt_secret, "staff-user", "staff")?;
+    let staff_url = format!(
+        "ws://{}/optimistic/ws?role=follower&site=default&subprotocol=1.0.0",
+        gateway_base
+    );
+    let mut staff_ws = connect_with_cookie(staff_url, Some(&staff_cookie)).await?;
+    let staff_hello = ws_wait_for(&mut staff_ws, "hello").await?;
+    assert_eq!(staff_hello["authRole"], "staff");
+    let _ = ws_wait_for(&mut staff_ws, "replay").await?;
+    staff_ws
+        .send(Message::Text(
+            json!({
+                "type": "channel.subscribe",
+                "channel": "ops.audit",
+                "params": { "scope": "secure" }
+            })
+            .to_string(),
+        ))
+        .await?;
+    let staff_ack = ws_wait_for(&mut staff_ws, "channel.ack").await?;
+    assert_eq!(staff_ack["status"], "ok");
+    assert_eq!(staff_ack["params"], json!({ "scope": "secure" }));
+    let staff_snapshot = ws_wait_for(&mut staff_ws, "channel.snapshot").await?;
+    assert_eq!(staff_snapshot["channel"], "ops.audit");
+    assert_eq!(staff_snapshot["params"], json!({ "scope": "secure" }));
+
+    let guest_sse_base = gateway_base.clone();
+    let staff_sse_base = gateway_base.clone();
+    let staff_cookie_for_sse = staff_cookie.clone();
+    let guest_sse = tokio::spawn(async move {
+        sse_wait_for_with_headers_timeout(
+            &guest_sse_base,
+            &["island.invalidate"],
+            Some("?islands=ops.dashboard"),
+            None,
+            Duration::from_millis(700),
+        )
+        .await
+    });
+    let staff_sse = tokio::spawn(async move {
+        sse_wait_for_with_headers_timeout(
+            &staff_sse_base,
+            &["island.invalidate"],
+            Some("?islands=ops.dashboard"),
+            Some(&staff_cookie_for_sse),
+            Duration::from_secs(3),
+        )
+        .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/internal/backend/events", gateway_base))
+        .json(&json!({
+            "event": {
+                "site": "default",
+                "reason": "ops-refresh",
+                "islandId": "ops.dashboard",
+                "timestamp": now_millis(),
+                "payload": { "status": "green" }
+            }
+        }))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+
+    let staff_sse_event = staff_sse.await??;
+    assert_eq!(staff_sse_event["type"], "island.invalidate");
+    assert_eq!(staff_sse_event["data"]["islandId"], "ops.dashboard");
+    assert_eq!(staff_sse_event["data"]["reason"], "ops-refresh");
+
+    let guest_sse_result = guest_sse.await?;
+    assert!(guest_sse_result.is_err(), "guest SSE unexpectedly received protected island event");
+
+    let staff_ws_event =
+        ws_wait_for_with_timeout(&mut staff_ws, "island.invalidate", Duration::from_secs(2)).await?;
+    assert_eq!(staff_ws_event["islandId"], "ops.dashboard");
+    assert_eq!(staff_ws_event["reason"], "ops-refresh");
+
+    let guest_island_event =
+        ws_wait_for_with_timeout(&mut guest_ws, "island.invalidate", Duration::from_millis(700)).await;
+    assert!(
+        guest_island_event.is_err(),
+        "guest WS unexpectedly received protected island event"
+    );
+
     gateway_handle.abort();
     backend_handle.abort();
     Ok(())

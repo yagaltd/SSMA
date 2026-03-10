@@ -11,6 +11,8 @@ pub struct Config {
     pub subprotocol: String,
     pub backend_url: String,
     pub backend_internal_token: String,
+    pub auth_cookie_name: String,
+    pub auth_jwt_secret: String,
     pub require_auth_for_writes: bool,
     pub replay_window_ms: u64,
     pub intent_store_path: PathBuf,
@@ -20,6 +22,7 @@ pub struct Config {
     pub channel_subscribe_max: u32,
     pub protected_channels: Vec<String>,
     pub protected_channel_min_role: String,
+    pub island_access: HashMap<String, String>,
 }
 
 impl Config {
@@ -35,6 +38,9 @@ impl Config {
             .unwrap_or(5050);
         let backend_url = std::env::var("SSMA_BACKEND_URL").unwrap_or_default();
         let backend_internal_token = std::env::var("SSMA_BACKEND_INTERNAL_TOKEN").unwrap_or_default();
+        let auth_cookie_name = std::env::var("SSMA_AUTH_COOKIE").unwrap_or_else(|_| "ssma_session".to_string());
+        let auth_jwt_secret =
+            std::env::var("SSMA_AUTH_JWT_SECRET").unwrap_or_else(|_| "change-me-in-production".to_string());
         let require_auth_for_writes = std::env::var("SSMA_OPTIMISTIC_REQUIRE_AUTH_WRITES")
             .map(|v| v == "true")
             .unwrap_or(false);
@@ -81,6 +87,8 @@ impl Config {
             subprotocol,
             backend_url,
             backend_internal_token,
+            auth_cookie_name,
+            auth_jwt_secret,
             require_auth_for_writes,
             replay_window_ms,
             intent_store_path,
@@ -90,8 +98,19 @@ impl Config {
             channel_subscribe_max,
             protected_channels,
             protected_channel_min_role,
+            island_access: default_island_access(),
         }
     }
+}
+
+fn default_island_access() -> HashMap<String, String> {
+    HashMap::from([
+        ("product-inventory".to_string(), "guest".to_string()),
+        ("product-reviews".to_string(), "user".to_string()),
+        ("blog-comments".to_string(), "user".to_string()),
+        ("hydration-test".to_string(), "guest".to_string()),
+        ("ops.dashboard".to_string(), "staff".to_string()),
+    ])
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

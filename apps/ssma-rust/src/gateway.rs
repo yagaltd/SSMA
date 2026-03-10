@@ -1,4 +1,4 @@
-use crate::backend::{BackendContext, BackendHttpClient};
+use crate::backend::{BackendContext, BackendHttpClient, BackendUser};
 use crate::protocol;
 use crate::runtime::{now_millis, Config, IntentRecord, IntentStore};
 use async_stream::stream;
@@ -10,9 +10,10 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -46,13 +47,21 @@ struct MetricsState {
     broadcast_count: AtomicU64,
     rate_limit_hits: AtomicU64,
     sse_client_dropped: AtomicU64,
+    ws_unauthorized_filtered: AtomicU64,
+    sse_unauthorized_filtered: AtomicU64,
     server_events: Mutex<HashMap<String, u64>>,
+}
+
+#[derive(Debug, Clone)]
+struct ChannelSubscription {
+    channel: String,
+    params: Value,
 }
 
 #[derive(Debug, Clone, Default)]
 struct ConnectionChannels {
     site: String,
-    channels: HashMap<String, Value>,
+    subscriptions: HashMap<String, ChannelSubscription>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +70,13 @@ struct WsQuery {
     site: Option<String>,
     subprotocol: Option<String>,
     cursor: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SseQuery {
+    site: Option<String>,
+    cursor: Option<u64>,
+    islands: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +92,20 @@ struct ConnectionContext {
     site: String,
     connection_id: String,
     user_id: Option<String>,
+    ip: String,
+    user_agent: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AuthClaims {
+    sub: String,
+    role: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedUser {
+    id: String,
+    role: String,
 }
 
 pub fn build_state(config: Config) -> Arc<AppState> {
@@ -142,6 +172,8 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Json<Value> {
             "broadcasts": state.metrics.broadcast_count.load(Ordering::Relaxed),
             "rateLimitHits": state.metrics.rate_limit_hits.load(Ordering::Relaxed),
             "sseClientDropped": state.metrics.sse_client_dropped.load(Ordering::Relaxed),
+            "wsUnauthorizedFiltered": state.metrics.ws_unauthorized_filtered.load(Ordering::Relaxed),
+            "sseUnauthorizedFiltered": state.metrics.sse_unauthorized_filtered.load(Ordering::Relaxed),
         },
         "store": {
             "cursor": state.store.latest_cursor(),
@@ -203,14 +235,25 @@ async fn ws_session(
     let transport_role = query.role.unwrap_or_else(|| "follower".to_string());
     let site = query.site.unwrap_or_else(|| "default".to_string());
     let connection_id = Uuid::new_v4().to_string();
-    let user_id = parse_user_id_from_cookie(&headers);
-    let auth_role = parse_user_role_from_cookie(&headers).unwrap_or_else(|| "guest".to_string());
+    let user = resolve_user_from_headers(&headers, &state.config);
+    let ip = connection_ip_from_headers(&headers);
+    let user_agent = headers
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+    let user_id = user.as_ref().map(|resolved| resolved.id.clone());
+    let auth_role = user
+        .as_ref()
+        .map(|resolved| resolved.role.clone())
+        .unwrap_or_else(|| "guest".to_string());
     let context = ConnectionContext {
         transport_role: transport_role.clone(),
         auth_role: auth_role.clone(),
         site: site.clone(),
         connection_id: connection_id.clone(),
         user_id,
+        ip,
+        user_agent,
     };
 
     let (mut sender, mut receiver) = socket.split();
@@ -331,8 +374,8 @@ async fn ws_session(
             event = event_rx.recv() => {
                 match event {
                     Ok(event) => {
-                        if let Some(channel_frame) = build_channel_frame_for_connection(&state, &context.connection_id, &event) {
-                            let _ = sender.send(Message::Text(channel_frame.to_string())).await;
+                        for frame in build_frames_for_connection(&state, &context, &event) {
+                            let _ = sender.send(Message::Text(frame.to_string())).await;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -418,8 +461,12 @@ async fn handle_intent_batch(
         let backend_ctx = BackendContext {
             site: context.site.clone(),
             connection_id: Some(context.connection_id.clone()),
-            user_id: context.user_id.clone(),
-            user_role: Some(context.auth_role.clone()),
+            ip: Some(context.ip.clone()),
+            user_agent: context.user_agent.clone(),
+            user: Some(BackendUser {
+                id: context.user_id.clone(),
+                role: context.auth_role.clone(),
+            }),
         };
         let fresh_payload = outcome
             .fresh
@@ -530,6 +577,7 @@ async fn handle_channel_subscribe(
     payload: Value,
 ) {
     let channel = payload.get("channel").and_then(|v| v.as_str()).unwrap_or("global");
+    let params = payload.get("params").cloned().unwrap_or_else(|| json!({}));
 
     if !can_access_channel(state, channel, context) {
         emit_server_event(
@@ -539,12 +587,12 @@ async fn handle_channel_subscribe(
         );
         let _ = sender
             .send(Message::Text(
-                json!({ "type": "channel.ack", "status": "error", "channel": channel, "code": "ACCESS_DENIED" }).to_string(),
+                json!({ "type": "channel.ack", "status": "error", "channel": channel, "params": params.clone(), "code": "ACCESS_DENIED" }).to_string(),
             ))
             .await;
         let _ = sender
             .send(Message::Text(
-                json!({ "type": "channel.close", "status": "error", "channel": channel, "code": "ACCESS_DENIED" }).to_string(),
+                json!({ "type": "channel.close", "status": "error", "channel": channel, "params": params.clone(), "code": "ACCESS_DENIED" }).to_string(),
             ))
             .await;
         return;
@@ -579,7 +627,7 @@ async fn handle_channel_subscribe(
         &context.connection_id,
         &context.site,
         channel,
-        payload.get("params").cloned().unwrap_or_else(|| json!({})),
+        params.clone(),
     );
 
     emit_server_event(
@@ -588,40 +636,47 @@ async fn handle_channel_subscribe(
         json!({"channel": channel, "site": context.site, "connectionId": context.connection_id}),
     );
 
-    let _ = sender
-        .send(Message::Text(
-            json!({ "type": "channel.ack", "status": "ok", "channel": channel }).to_string(),
-        ))
-        .await;
+        let _ = sender
+            .send(Message::Text(
+                json!({ "type": "channel.ack", "status": "ok", "channel": channel, "params": params.clone() }).to_string(),
+            ))
+            .await;
 
+    let mut snapshot_cursor = state.store.latest_cursor();
     let intents = if state.backend.is_configured() {
         let backend_ctx = BackendContext {
             site: context.site.clone(),
             connection_id: Some(context.connection_id.clone()),
-            user_id: context.user_id.clone(),
-            user_role: Some(context.auth_role.clone()),
+            ip: Some(context.ip.clone()),
+            user_agent: context.user_agent.clone(),
+            user: Some(BackendUser {
+                id: context.user_id.clone(),
+                role: context.auth_role.clone(),
+            }),
         };
         match state
             .backend
-            .subscribe(channel, payload.get("params").cloned().unwrap_or_else(|| json!({})), &backend_ctx)
+            .subscribe(channel, params.clone(), &backend_ctx)
             .await
         {
-            Ok(response) if response.get("status").and_then(|v| v.as_str()) == Some("ok") => response
-                .get("snapshot")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default(),
-            _ => state
-                .store
-                .entries_after(0, 200)
+            Ok(response) if response.get("status").and_then(|v| v.as_str()) == Some("ok") => {
+                snapshot_cursor = response
+                    .get("cursor")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(snapshot_cursor);
+                response
+                    .get("snapshot")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+            }
+            _ => store_entries_for_channel_after(state, channel, 0, 200)
                 .into_iter()
                 .map(|entry| serde_json::to_value(entry).unwrap_or(Value::Null))
                 .collect(),
         }
     } else {
-        state
-            .store
-            .entries_after(0, 200)
+        store_entries_for_channel_after(state, channel, 0, 200)
             .into_iter()
             .map(|entry| serde_json::to_value(entry).unwrap_or(Value::Null))
             .collect()
@@ -632,8 +687,9 @@ async fn handle_channel_subscribe(
             json!({
                 "type": "channel.snapshot",
                 "channel": channel,
+                "params": params.clone(),
                 "intents": intents,
-                "cursor": state.store.latest_cursor(),
+                "cursor": snapshot_cursor,
             })
             .to_string(),
         ))
@@ -647,7 +703,8 @@ async fn handle_channel_unsubscribe(
     payload: Value,
 ) {
     let channel = payload.get("channel").and_then(|v| v.as_str()).unwrap_or("global");
-    unregister_channel_subscription(state, &context.connection_id, channel);
+    let params = payload.get("params").cloned().unwrap_or_else(|| json!({}));
+    unregister_channel_subscription(state, &context.connection_id, channel, &params);
 
     let _ = sender
         .send(Message::Text(
@@ -656,7 +713,7 @@ async fn handle_channel_unsubscribe(
         .await;
     let _ = sender
         .send(Message::Text(
-            json!({ "type": "channel.close", "status": "ok", "channel": channel, "reason": "client-unsubscribe" }).to_string(),
+            json!({ "type": "channel.close", "status": "ok", "channel": channel, "params": params, "reason": "client-unsubscribe" }).to_string(),
         ))
         .await;
 }
@@ -668,6 +725,7 @@ async fn handle_channel_resync(
     payload: Value,
 ) {
     let channel = payload.get("channel").and_then(|v| v.as_str()).unwrap_or("global");
+    let params = payload.get("params").cloned().unwrap_or_else(|| json!({}));
     if !can_access_channel(state, channel, context) {
         emit_server_event(
             state,
@@ -676,17 +734,17 @@ async fn handle_channel_resync(
         );
         let _ = sender
             .send(Message::Text(
-                json!({ "type": "channel.close", "status": "error", "channel": channel, "code": "ACCESS_DENIED" }).to_string(),
+                json!({ "type": "channel.close", "status": "error", "channel": channel, "params": params, "code": "ACCESS_DENIED" }).to_string(),
             ))
             .await;
         return;
     }
     let cursor = payload.get("cursor").and_then(|v| v.as_u64()).unwrap_or(0);
-    let intents = state.store.entries_after(cursor, 200);
+    let intents = store_entries_for_channel_after(state, channel, cursor, 200);
     let next = intents.last().map(|entry| entry.log_seq).unwrap_or(cursor);
     let _ = sender
         .send(Message::Text(
-            json!({ "type": "channel.replay", "status": "ok", "channel": channel, "cursor": next, "intents": intents }).to_string(),
+            json!({ "type": "channel.replay", "status": "ok", "channel": channel, "params": params, "cursor": next, "intents": intents }).to_string(),
         ))
         .await;
 }
@@ -698,6 +756,7 @@ async fn handle_channel_command(
     payload: Value,
 ) {
     let channel = payload.get("channel").and_then(|v| v.as_str()).unwrap_or("global");
+    let params = payload.get("params").cloned().unwrap_or_else(|| json!({}));
     if !can_access_channel(state, channel, context) {
         emit_server_event(
             state,
@@ -706,7 +765,7 @@ async fn handle_channel_command(
         );
         let _ = sender
             .send(Message::Text(
-                json!({ "type": "channel.close", "status": "error", "channel": channel, "code": "ACCESS_DENIED" }).to_string(),
+                json!({ "type": "channel.close", "status": "error", "channel": channel, "params": params, "code": "ACCESS_DENIED" }).to_string(),
             ))
             .await;
         return;
@@ -714,20 +773,24 @@ async fn handle_channel_command(
     let command = payload.get("command").and_then(|v| v.as_str()).unwrap_or("unknown");
     let _ = sender
         .send(Message::Text(
-            json!({ "type": "channel.command", "status": "ok", "channel": channel, "command": command }).to_string(),
+            json!({ "type": "channel.command", "status": "ok", "channel": channel, "params": params, "command": command }).to_string(),
         ))
         .await;
 }
 
 async fn sse_events(
-    Query(query): Query<HashMap<String, String>>,
+    Query(query): Query<SseQuery>,
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
-    let site = query.get("site").cloned().unwrap_or_else(|| "default".to_string());
-    let replay_cursor = query
-        .get("cursor")
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0);
+    let site = query.site.clone().unwrap_or_else(|| "default".to_string());
+    let replay_cursor = query.cursor.unwrap_or(0);
+    let islands = parse_requested_islands(query.islands.as_deref());
+    let user = resolve_user_from_headers(&headers, &state.config);
+    let auth_role = user
+        .as_ref()
+        .map(|resolved| resolved.role.clone())
+        .unwrap_or_else(|| "guest".to_string());
     let replay = state.store.entries_after(replay_cursor, 500);
     let replay_cursor = replay.last().map(|entry| entry.log_seq).unwrap_or(replay_cursor);
 
@@ -745,6 +808,13 @@ async fn sse_events(
                 Ok(event) => {
                     let event_site = event.get("site").and_then(|v| v.as_str()).unwrap_or("default");
                     if event_site != site {
+                        continue;
+                    }
+                    if !is_sse_event_authorized(&state_for_stream, &auth_role, islands.as_ref(), &event) {
+                        state_for_stream
+                            .metrics
+                            .sse_unauthorized_filtered
+                            .fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
                     let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("message").to_string();
@@ -776,8 +846,10 @@ fn publish_backend_event(state: &Arc<AppState>, event: &Value) {
             "reason": reason,
             "site": site,
             "islandId": island_id,
+            "parameters": event.get("parameters").cloned().unwrap_or_else(|| json!({})),
             "timestamp": event.get("timestamp").cloned().unwrap_or_else(|| json!(now_millis())),
             "cursor": event.get("cursor").cloned().unwrap_or_else(|| json!(state.store.latest_cursor())),
+            "dataContract": event.get("dataContract").cloned().unwrap_or(Value::Null),
             "payload": event.get("payload").cloned().unwrap_or_else(|| json!({})),
         }));
     }
@@ -814,57 +886,114 @@ fn register_channel_subscription(
     let mut registry = state.channel_registry.lock().expect("channel registry lock");
     let row = registry.entry(connection_id.to_string()).or_default();
     row.site = site.to_string();
-    row.channels.insert(channel.to_string(), params);
+    let subscription_key = subscription_key(channel, &params);
+    row.subscriptions.insert(
+        subscription_key,
+        ChannelSubscription {
+            channel: channel.to_string(),
+            params,
+        },
+    );
 }
 
-fn unregister_channel_subscription(state: &Arc<AppState>, connection_id: &str, channel: &str) {
+fn unregister_channel_subscription(state: &Arc<AppState>, connection_id: &str, channel: &str, params: &Value) {
     let mut registry = state.channel_registry.lock().expect("channel registry lock");
     if let Some(row) = registry.get_mut(connection_id) {
-        row.channels.remove(channel);
-        if row.channels.is_empty() {
+        row.subscriptions.remove(&subscription_key(channel, params));
+        if row.subscriptions.is_empty() {
             registry.remove(connection_id);
         }
     }
 }
 
-fn build_channel_frame_for_connection(state: &Arc<AppState>, connection_id: &str, event: &Value) -> Option<Value> {
+fn build_frames_for_connection(state: &Arc<AppState>, context: &ConnectionContext, event: &Value) -> Vec<Value> {
+    let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("message");
+    if event_type == "island.invalidate" {
+        if is_island_authorized(state, &context.auth_role, None, event) {
+            return vec![event.clone()];
+        }
+        state.metrics.ws_unauthorized_filtered.fetch_add(1, Ordering::Relaxed);
+        return Vec::new();
+    }
+
+    if event_type != "invalidate" {
+        return Vec::new();
+    }
+
     let row = {
         let registry = state.channel_registry.lock().expect("channel registry lock");
-        registry.get(connection_id).cloned()?
+        match registry.get(&context.connection_id) {
+            Some(row) => row.clone(),
+            None => return Vec::new(),
+        }
     };
 
     let event_site = event.get("site").and_then(|v| v.as_str()).unwrap_or("default");
     if event_site != row.site {
-        return None;
+        return Vec::new();
     }
 
     let event_channels = extract_event_channels(event);
     if event_channels.is_empty() {
-        return None;
+        return Vec::new();
     }
 
-    let subscribed = row.channels.keys().cloned().collect::<HashSet<_>>();
-    let mut matched = event_channels
-        .iter()
-        .filter(|ch| subscribed.contains(*ch))
+    let intents = event.get("intents").cloned().unwrap_or_else(|| json!([]));
+    let reason = event.get("reason").cloned().unwrap_or_else(|| json!("backend-event"));
+    let cursor = event
+        .get("cursor")
         .cloned()
-        .collect::<Vec<_>>();
+        .unwrap_or_else(|| json!(state.store.latest_cursor()));
+    let site = row.site.clone();
 
-    if matched.is_empty() && subscribed.contains("global") {
-        matched.push("global".to_string());
-    }
-    if matched.is_empty() {
-        return None;
-    }
+    row.subscriptions
+        .values()
+        .filter(|subscription| event_channels.iter().any(|channel_id| channel_id == &subscription.channel))
+        .map(|subscription| {
+            json!({
+                "type": "channel.invalidate",
+                "site": site.clone(),
+                "channel": subscription.channel.clone(),
+                "params": subscription.params.clone(),
+                "reason": reason.clone(),
+                "cursor": cursor.clone(),
+                "intents": intents.clone(),
+            })
+        })
+        .collect()
+}
 
-    Some(json!({
-        "type": "channel.invalidate",
-        "site": row.site,
-        "channels": matched,
-        "reason": event.get("reason").cloned().unwrap_or_else(|| json!("backend-event")),
-        "cursor": event.get("cursor").cloned().unwrap_or_else(|| json!(state.store.latest_cursor())),
-        "intents": event.get("intents").cloned().unwrap_or_else(|| json!([])),
-    }))
+fn store_entries_for_channel_after(
+    state: &Arc<AppState>,
+    channel: &str,
+    cursor: u64,
+    limit: usize,
+) -> Vec<IntentRecord> {
+    state
+        .store
+        .entries_after(cursor, limit.saturating_mul(4).max(limit))
+        .into_iter()
+        .filter(|entry| entry_matches_channel(entry, channel))
+        .take(limit)
+        .collect()
+}
+
+fn entry_matches_channel(entry: &IntentRecord, channel: &str) -> bool {
+    let channels = entry
+        .meta
+        .get("channels")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>()
+        });
+
+    match channels {
+        Some(values) if !values.is_empty() => values.iter().any(|value| *value == channel),
+        _ => channel == "global",
+    }
 }
 
 fn extract_event_channels(event: &Value) -> Vec<String> {
@@ -891,11 +1020,27 @@ fn extract_event_channels(event: &Value) -> Vec<String> {
     vec!["global".to_string()]
 }
 
-fn parse_user_id_from_cookie(headers: &HeaderMap) -> Option<String> {
+fn resolve_user_from_headers(headers: &HeaderMap, config: &Config) -> Option<ResolvedUser> {
+    let token = cookie_value(headers, &config.auth_cookie_name)?;
+    let claims = decode::<AuthClaims>(
+        &token,
+        &DecodingKey::from_secret(config.auth_jwt_secret.as_bytes()),
+        &Validation::new(Algorithm::HS256),
+    )
+    .ok()?
+    .claims;
+
+    Some(ResolvedUser {
+        id: claims.sub,
+        role: claims.role.unwrap_or_else(|| "user".to_string()),
+    })
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie = headers.get("cookie")?.to_str().ok()?;
     for segment in cookie.split(';') {
         let trimmed = segment.trim();
-        if let Some(value) = trimmed.strip_prefix("ssma_session=") {
+        if let Some(value) = trimmed.strip_prefix(&format!("{}=", name)) {
             if !value.is_empty() {
                 return Some(value.to_string());
             }
@@ -904,17 +1049,93 @@ fn parse_user_id_from_cookie(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-fn parse_user_role_from_cookie(headers: &HeaderMap) -> Option<String> {
-    let cookie = headers.get("cookie")?.to_str().ok()?;
-    for segment in cookie.split(';') {
-        let trimmed = segment.trim();
-        if let Some(value) = trimmed.strip_prefix("ssma_role=") {
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
+fn connection_ip_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn parse_requested_islands(raw: Option<&str>) -> Option<Vec<String>> {
+    let islands = raw
+        .unwrap_or_default()
+        .split(',')
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+
+    if islands.is_empty() {
+        None
+    } else {
+        Some(islands)
+    }
+}
+
+fn is_sse_event_authorized(
+    state: &Arc<AppState>,
+    role: &str,
+    requested_islands: Option<&Vec<String>>,
+    event: &Value,
+) -> bool {
+    is_island_authorized(state, role, requested_islands, event)
+}
+
+fn is_island_authorized(
+    state: &Arc<AppState>,
+    role: &str,
+    requested_islands: Option<&Vec<String>>,
+    event: &Value,
+) -> bool {
+    if event.get("type").and_then(|value| value.as_str()) != Some("island.invalidate") {
+        return true;
+    }
+    let Some(island_id) = event.get("islandId").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    if let Some(allowed_islands) = requested_islands {
+        if !allowed_islands.iter().any(|value| value == island_id) {
+            return false;
         }
     }
-    None
+    let required_role = state
+        .config
+        .island_access
+        .get(island_id)
+        .map(|value| value.as_str())
+        .unwrap_or("guest");
+    role_rank(role) >= role_rank(required_role)
+}
+
+fn subscription_key(channel: &str, params: &Value) -> String {
+    format!("{}:{}", channel, stable_value_string(params))
+}
+
+fn stable_value_string(value: &Value) -> String {
+    match value {
+        Value::Array(items) => {
+            let serialized = items
+                .iter()
+                .map(stable_value_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[{}]", serialized)
+        }
+        Value::Object(map) => {
+            let mut entries = map.iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            let serialized = entries
+                .into_iter()
+                .map(|(key, item)| format!("\"{}\":{}", key, stable_value_string(item)))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{}}}", serialized)
+        }
+        _ => serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
+    }
 }
 
 fn normalize_status(status: Option<&str>) -> &'static str {

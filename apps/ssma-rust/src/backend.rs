@@ -2,11 +2,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendUser {
+    pub id: Option<String>,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BackendContext {
     pub site: String,
     pub connection_id: Option<String>,
-    pub user_id: Option<String>,
-    pub user_role: Option<String>,
+    pub ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub user: Option<BackendUser>,
 }
 
 #[derive(Debug, Clone)]

@@ -7,7 +7,8 @@ SSMA is backend-agnostic and communicates through a narrow internal adapter cont
 ### `applyIntents(batch, ctx)`
 - Input:
   - `batch`: array of persisted intent entries (`id`, `intent`, `payload`, `meta`, `logSeq`, `site`)
-  - `ctx`: `{ user, site, connectionId, ip, userAgent }`
+  - `ctx`: `{ site, connectionId, ip, userAgent, user }`
+  - `user`: `null` for guests, otherwise `{ id, role }`
 - Output:
   - `{ results, events }`
   - `results[]`: `{ id, status, code?, message?, events? }`
@@ -42,9 +43,8 @@ Default mapping used by both runtimes:
 - `POST /health`
 
 Runtime note:
-
-- JS runtime may support additional fallback behavior for legacy integrations.
-- Rust runtime uses strict endpoint mapping plus explicit error/status normalization.
+- JS and Rust serialize the adapter context in the same camelCase JSON shape.
+- Backends should treat `ctx.user` as the canonical auth envelope instead of reading transport-specific cookies.
 
 ## Failure semantics
 

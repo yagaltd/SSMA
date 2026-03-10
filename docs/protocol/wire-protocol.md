@@ -7,10 +7,10 @@ Canonical schemas live in `packages/ssma-protocol/contracts/`.
 | Message | Contract | Required fields | Notes |
 |---|---|---|---|
 | `intent.batch` | `optimistic.INTENT_BATCH` | `type`, `intents[]` | Write path; leader-only. |
-| `channel.subscribe` | `channels.CHANNEL_SUBSCRIBE` | `type`, `channel` | Returns `channel.ack` + optional `channel.snapshot`. |
-| `channel.unsubscribe` | `channels.CHANNEL_UNSUBSCRIBE` | `type`, `channel` | Returns `channel.unsubscribed`. |
-| `channel.resync` | `channels.CHANNEL_RESYNC` | `type`, `channel` | Returns `channel.replay`. |
-| `channel.command` | `channels.CHANNEL_COMMAND` | `type`, `channel`, `command` | Returns `channel.command`. |
+| `channel.subscribe` | `channels.CHANNEL_SUBSCRIBE` | `type`, `channel` | `params` is optional on the wire but preserved in all downstream frames for that subscription. |
+| `channel.unsubscribe` | `channels.CHANNEL_UNSUBSCRIBE` | `type`, `channel` | `params` selects the exact subscription instance to close. |
+| `channel.resync` | `channels.CHANNEL_RESYNC` | `type`, `channel` | `params` keeps resync scoped to the original subscription. |
+| `channel.command` | `channels.CHANNEL_COMMAND` | `type`, `channel`, `command` | `params` is forwarded with the command response. |
 | `ping` | `optimistic.PING` | `type` | Returns `pong`. |
 
 ## WS server -> client
@@ -20,12 +20,12 @@ Canonical schemas live in `packages/ssma-protocol/contracts/`.
 | `hello` | `subprotocol`, `connectionId` | First frame after handshake success. |
 | `ack` | `intents[]` (`id`,`status`,`logSeq`) | Per-intent result map. |
 | `replay` | `intents[]`, `cursor` | Sent on connect; may be empty. |
-| `channel.ack` | `status`, `channel` | Subscribe acknowledgement / errors. |
-| `channel.snapshot` | `channel`, `intents[]`, `cursor` | Initial channel state. |
-| `channel.replay` | `status`, `intents[]`, `cursor` | Resync payload. |
-| `channel.invalidate` | `channel`, `intents[]`, `cursor` | Channel invalidation fanout. |
+| `channel.ack` | `status`, `channel`, `params?` | Subscribe acknowledgement / errors. |
+| `channel.snapshot` | `channel`, `params`, `intents[]`, `cursor` | Initial channel state for one scoped subscription. |
+| `channel.replay` | `status`, `channel`, `params`, `intents[]`, `cursor` | Resync payload for one scoped subscription. |
+| `channel.invalidate` | `channel`, `params`, `intents[]`, `cursor` | Channel invalidation fanout. Uses a single `channel`, not `channels[]`. |
 | `channel.close` | `channel`, `code` | Subscription closure reason. |
-| `channel.command` | `status`, `command` | Command response. |
+| `channel.command` | `status`, `command`, `params?` | Command response. |
 | `error` | `code`, `message?` | Contract in `errors.ERROR_FRAME`. |
 
 ## SSE server -> client

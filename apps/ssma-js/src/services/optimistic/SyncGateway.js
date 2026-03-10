@@ -40,11 +40,14 @@ export class SyncGateway {
     this.wss = null;
     this.channelBuckets = new Map();
     this.connections = new Map();
+    this.started = false;
+    this.destroyPromise = null;
     this.wsConfig = {
       maxBufferedBytes: transport?.ws?.maxBufferedBytes ?? 256 * 1024,
       slowConsumerCloseMs: transport?.ws?.slowConsumerCloseMs ?? 10 * 1000,
     };
     this.islandAccess = new Map(Object.entries(transport?.islandAccess || {}));
+    this.upgradeHandler = this._handleUpgrade.bind(this);
     this.metrics = {
       broadcastsTotal: 0,
       broadcastsByType: {},
@@ -63,26 +66,96 @@ export class SyncGateway {
     if (!this.server) {
       throw new Error("[SyncGateway] HTTP server is required");
     }
+    if (this.started) {
+      return;
+    }
 
     this.wss = new WebSocketServer({ noServer: true });
-    this.server.on("upgrade", (request, socket, head) => {
-      try {
-        const url = new URL(
-          request.url || "/",
-          `http://${request.headers.host || "localhost"}`,
-        );
-        if (url.pathname !== "/optimistic/ws") {
-          socket.destroy();
-          return;
+    this.server.on("upgrade", this.upgradeHandler);
+    this.started = true;
+  }
+
+  async destroy() {
+    if (this.destroyPromise) {
+      return this.destroyPromise;
+    }
+
+    this.destroyPromise = (async () => {
+      if (this.started) {
+        if (typeof this.server?.off === "function") {
+          this.server.off("upgrade", this.upgradeHandler);
+        } else {
+          this.server?.removeListener?.("upgrade", this.upgradeHandler);
         }
-        this.wss.handleUpgrade(request, socket, head, (ws) => {
-          this.handleConnection(ws, url, request);
-        });
-      } catch (error) {
-        console.error("[SyncGateway] Failed to handle upgrade", error);
-        socket.destroy();
+        this.started = false;
       }
-    });
+
+      const activeSockets = [...this.connections.values()].map(({ ws }) => ws);
+      for (const socket of activeSockets) {
+        try {
+          socket.close(1001, "SERVER_SHUTDOWN");
+        } catch (error) {
+          socket.terminate?.();
+        }
+      }
+
+      await Promise.all(
+        activeSockets.map(
+          (socket) =>
+            new Promise((resolve) => {
+              let resolved = false;
+              const finish = () => {
+                if (resolved) return;
+                resolved = true;
+                resolve();
+              };
+              socket.once?.("close", finish);
+              setTimeout(() => {
+                try {
+                  socket.terminate?.();
+                } catch (error) {
+                  // ignore during shutdown
+                }
+                finish();
+              }, 25);
+            }),
+        ),
+      );
+
+      if (this.wss) {
+        const wss = this.wss;
+        this.wss = null;
+        await new Promise((resolve) => wss.close(() => resolve()));
+      }
+
+      for (const connectionId of [...this.connections.keys()]) {
+        this.channelRegistry?.detachConnection(connectionId);
+        this.connections.delete(connectionId);
+      }
+      this.metrics.activeConnections = 0;
+      this.channelBuckets.clear();
+    })();
+
+    return this.destroyPromise;
+  }
+
+  _handleUpgrade(request, socket, head) {
+    try {
+      const url = new URL(
+        request.url || "/",
+        `http://${request.headers.host || "localhost"}`,
+      );
+      if (url.pathname !== "/optimistic/ws") {
+        socket.destroy();
+        return;
+      }
+      this.wss.handleUpgrade(request, socket, head, (ws) => {
+        this.handleConnection(ws, url, request);
+      });
+    } catch (error) {
+      console.error("[SyncGateway] Failed to handle upgrade", error);
+      socket.destroy();
+    }
   }
 
   async handleConnection(ws, url, request) {

@@ -1,4 +1,10 @@
 use anyhow::Result;
+use axum::extract::State;
+use axum::routing::post;
+use axum::{Json, Router};
+use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
+use tokio::net::TcpListener;
 
 #[test]
 fn intent_store_assigns_monotonic_cursor() -> Result<()> {
@@ -82,5 +88,78 @@ fn intent_store_dedupes_by_site_and_id() -> Result<()> {
     assert_eq!(second.fresh.len(), 0);
     assert_eq!(third.fresh.len(), 1);
     let _ = std::fs::remove_file(path);
+    Ok(())
+}
+
+#[derive(Clone, Default)]
+struct RequestCapture {
+    payload: Arc<Mutex<Option<Value>>>,
+}
+
+async fn capture_apply(
+    State(capture): State<RequestCapture>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    *capture.payload.lock().expect("capture lock") = Some(body);
+    Json(json!({ "results": [] }))
+}
+
+#[tokio::test]
+async fn backend_client_uses_canonical_context_shape() -> Result<()> {
+    let capture = RequestCapture::default();
+    let app = Router::new()
+        .route("/apply-intents", post(capture_apply))
+        .with_state(capture.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let client = ssma_rust::backend::BackendHttpClient::new(format!("http://127.0.0.1:{}", addr.port()));
+    let context = ssma_rust::backend::BackendContext {
+        site: "default".to_string(),
+        connection_id: Some("conn-1".to_string()),
+        ip: Some("127.0.0.1".to_string()),
+        user_agent: Some("cargo-test".to_string()),
+        user: Some(ssma_rust::backend::BackendUser {
+            id: Some("user-1".to_string()),
+            role: "staff".to_string(),
+        }),
+    };
+
+    client
+        .apply_intents(
+            vec![json!({
+                "id": "intent-1",
+                "intent": "TODO_CREATE",
+                "payload": { "id": "todo-1" },
+                "meta": {}
+            })],
+            &context,
+        )
+        .await?;
+
+    let payload = capture
+        .payload
+        .lock()
+        .expect("capture lock")
+        .clone()
+        .expect("captured payload");
+    assert_eq!(
+        payload.get("context"),
+        Some(&json!({
+            "site": "default",
+            "connectionId": "conn-1",
+            "ip": "127.0.0.1",
+            "userAgent": "cargo-test",
+            "user": {
+                "id": "user-1",
+                "role": "staff"
+            }
+        }))
+    );
+
+    handle.abort();
     Ok(())
 }

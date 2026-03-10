@@ -30,6 +30,35 @@ describe('BackendHttpClient', () => {
     expect(JSON.parse(options.body).payload).toEqual({ limit: 10 });
   });
 
+  it('sends canonical backend context shape', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ results: [] })
+    });
+    const client = new BackendHttpClient({ baseUrl: 'http://backend.local' });
+
+    await client.applyIntents(
+      [{ id: 'i-1', intent: 'TODO_CREATE', payload: { id: 'todo-1' }, meta: {} }],
+      {
+        site: 'default',
+        connectionId: 'conn-1',
+        ip: '127.0.0.1',
+        userAgent: 'vitest',
+        user: { id: 'user-1', role: 'staff' }
+      }
+    );
+
+    const [, options] = fetchSpy.mock.calls[0];
+    expect(JSON.parse(options.body).context).toEqual({
+      site: 'default',
+      connectionId: 'conn-1',
+      ip: '127.0.0.1',
+      userAgent: 'vitest',
+      user: { id: 'user-1', role: 'staff' }
+    });
+  });
+
   it('falls back to GET /health when POST health is unsupported', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce({
