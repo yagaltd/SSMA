@@ -41,6 +41,7 @@ Canonical schemas live in `packages/ssma-protocol/contracts/`.
 Session A rule:
 - model token deltas, RTC signaling, and other ephemeral stream events may fan out as `invalidate` payloads on request/session channels, but they do **not** enter the durable replay store.
 - replay is for persisted optimistic intents only.
+- Session B adds `audio.session.<id>` channels with the same rule: partial transcripts, audio output chunks, and session-control feedback fan out over channel invalidations but do **not** enter durable replay.
 
 ## HTTP media + RTC (Rust Session A)
 
@@ -51,6 +52,10 @@ Session A rule:
 | `GET /media/assets/:assetId` | Asset metadata for the current owner/session. |
 | `GET /media/assets/:assetId/content` | Raw asset bytes for the current owner/session. |
 | `DELETE /media/assets/:assetId` | Release uploaded asset. |
+| `POST /audio/sessions` | Create an SSMA-owned realtime audio session and linked RTC session. |
+| `GET /audio/sessions/:sessionId` | Inspect current audio session metadata and status. |
+| `DELETE /audio/sessions/:sessionId` | End an audio session and remove linked runtime state. |
+| `POST /audio/sessions/:sessionId/commands` | Send `start`, `pause`, `resume`, `interrupt`, `stop`, or mute commands. |
 | `POST /rtc/sessions` | Create a signaling session and return `rtc.session.<id>` channel name. |
 | `POST /rtc/sessions/:sessionId/signals` | Submit an offer/answer/candidate-style signal payload. |
 
@@ -64,6 +69,11 @@ Internal adapter fetch:
 Session A follow-up rule:
 - public queries forward `ctx.actorKey` so adapters can create backend-generated assets owned by the same caller
 - backend-created assets use `/internal/assets` and become readable through normal `/media/assets/:assetId/content`
+
+Realtime audio rule:
+- RTC signaling uses `rtc.session.<rtcSessionId>`
+- runtime/model events use `audio.session.<audioSessionId>`
+- both are ephemeral channels and are intentionally excluded from durable replay
 
 ## Error codes
 

@@ -63,6 +63,43 @@ Session A note:
 - Rust runtime implements the SSMA-owned media boundary and internal asset fetch contract.
 - JS runtime parity is still pending.
 
+## Realtime audio session contract (Rust-first)
+
+Session B adds an SSMA-owned realtime audio session layer on top of RTC signaling.
+
+Public gateway responsibilities:
+- `POST /audio/sessions`
+- `GET /audio/sessions/:sessionId`
+- `DELETE /audio/sessions/:sessionId`
+- `POST /audio/sessions/:sessionId/commands`
+- RTC signaling remains on `POST /rtc/sessions` and `POST /rtc/sessions/:sessionId/signals`
+
+Adapter expectations:
+- `applyIntents` should accept realtime audio control intents such as:
+  - `models.local.audio.session.start`
+  - `models.local.audio.session.stop`
+  - `models.local.audio.session.command`
+- `subscribe(channel, params, ctx)` should support snapshots for `audio.session.<audioSessionId>` when the backend owns live session state.
+- backend fanout events may be sent to SSMA `/internal/backend/events` with:
+  - `site`
+  - `audioSessionId`
+  - `eventType`
+  - `payload`
+
+Expected ephemeral event types:
+- `audio.session.started`
+- `audio.session.partial_transcript`
+- `audio.session.final_transcript`
+- `audio.session.audio_out_started`
+- `audio.session.audio_out_chunk`
+- `audio.session.audio_out_stopped`
+- `audio.session.interrupted`
+- `audio.session.ended`
+- `audio.session.error`
+
+Important rule:
+- realtime audio events are ephemeral stream events and must **not** be treated as durable optimistic replay state.
+
 ## Failure semantics
 
 - Transport/5xx failures map to `failed` intent status in SSMA ACKs.

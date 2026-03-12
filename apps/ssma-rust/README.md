@@ -10,6 +10,7 @@ This directory contains the Rust optimistic gateway implementation for SSMA prot
 - Metrics endpoint `/optimistic/metrics`
 - Internal backend event ingest endpoint `/internal/backend/events`
 - Public media asset routes `/media/assets/*`
+- Public realtime audio session routes `/audio/sessions*`
 - Backend asset routes `/internal/assets/*`
 - Strict inbound message validation via shared schemas in `../../packages/ssma-protocol/contracts`
 - File-backed intent store with `(site,id)` dedupe and monotonic `log_seq`
@@ -81,5 +82,11 @@ From repository root:
 - SSE endpoint: `/optimistic/events`
 - Public query endpoint: `/query/:name`
 - Public media routes: `/media/assets`, `/media/assets/:asset_id`, `/media/assets/:asset_id/content`
+- Public realtime audio routes: `/audio/sessions`, `/audio/sessions/:session_id`, `/audio/sessions/:session_id/commands`
 - Backend event ingest endpoint: `/internal/backend/events`
 - Backend asset routes: `/internal/assets`, `/internal/assets/:asset_id`, `/internal/assets/:asset_id/content`
+
+Realtime audio notes:
+- audio sessions are SSMA-owned state, not durable optimistic history
+- each audio session is linked to an RTC signaling session
+- `audio.session.<id>` channels are ephemeral and are replayable only through channel snapshot/resync, not through the durable `replay` frame

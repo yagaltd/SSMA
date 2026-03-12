@@ -31,6 +31,7 @@ pub struct AppState {
     pub events: broadcast::Sender<Value>,
     assets: Arc<Mutex<HashMap<String, AssetRecord>>>,
     rtc_sessions: Arc<Mutex<HashMap<String, RtcSessionRecord>>>,
+    audio_sessions: Arc<Mutex<HashMap<String, AudioSessionRecord>>>,
     channel_limits: Arc<Mutex<HashMap<String, RateBucket>>>,
     global_limits: Arc<Mutex<HashMap<String, RateBucket>>>,
     channel_registry: Arc<Mutex<HashMap<String, ConnectionChannels>>>,
@@ -68,6 +69,58 @@ struct RtcSessionRecord {
     owner_key: String,
     participants: Vec<String>,
     signals: Vec<RtcSignalRecord>,
+    next_seq: u64,
+    expires_at_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioSessionCapabilities {
+    audio_in: bool,
+    audio_out: bool,
+    partial_transcript: bool,
+    interrupt: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AudioSessionMode {
+    Transcription,
+    SpeechToSpeech,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AudioSessionStatus {
+    Created,
+    Signaling,
+    Connected,
+    Streaming,
+    Paused,
+    Ended,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+struct AudioSessionEventRecord {
+    seq: u64,
+    event_type: String,
+    payload: Value,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+struct AudioSessionRecord {
+    session_id: String,
+    rtc_session_id: String,
+    site: String,
+    owner_key: String,
+    participants: Vec<String>,
+    mode: AudioSessionMode,
+    status: AudioSessionStatus,
+    backend: String,
+    capabilities: AudioSessionCapabilities,
+    events: Vec<AudioSessionEventRecord>,
     next_seq: u64,
     expires_at_secs: u64,
 }
@@ -192,6 +245,23 @@ struct PostRtcSignalRequest {
     payload: Value,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateAudioSessionRequest {
+    participants: Option<Vec<String>>,
+    mode: Option<AudioSessionMode>,
+    backend: Option<String>,
+    capabilities: Option<AudioSessionCapabilities>,
+    ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioSessionCommandRequest {
+    command: String,
+    payload: Option<Value>,
+}
+
 pub fn build_state(config: Config) -> Arc<AppState> {
     let _ = fs::create_dir_all(&config.media_storage_root);
     if let Ok(entries) = fs::read_dir(&config.media_storage_root) {
@@ -212,6 +282,7 @@ pub fn build_state(config: Config) -> Arc<AppState> {
         events,
         assets: Arc::new(Mutex::new(HashMap::new())),
         rtc_sessions: Arc::new(Mutex::new(HashMap::new())),
+        audio_sessions: Arc::new(Mutex::new(HashMap::new())),
         channel_limits: Arc::new(Mutex::new(HashMap::new())),
         global_limits: Arc::new(Mutex::new(HashMap::new())),
         channel_registry: Arc::new(Mutex::new(HashMap::new())),
@@ -229,6 +300,15 @@ pub fn app(state: Arc<AppState>) -> Router {
             get(get_asset_metadata).delete(delete_asset),
         )
         .route("/media/assets/:asset_id/content", get(get_asset_content))
+        .route("/audio/sessions", post(create_audio_session))
+        .route(
+            "/audio/sessions/:session_id",
+            get(get_audio_session).delete(delete_audio_session),
+        )
+        .route(
+            "/audio/sessions/:session_id/commands",
+            post(post_audio_session_command),
+        )
         .route("/rtc/sessions", post(create_rtc_session))
         .route("/rtc/sessions/:session_id/signals", post(post_rtc_signal))
         .route("/optimistic/metrics", get(metrics))
@@ -761,6 +841,260 @@ async fn create_rtc_session(
             }
         })),
     ))
+}
+
+async fn create_audio_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CreateAudioSessionRequest>,
+) -> ApiResult<impl IntoResponse> {
+    purge_expired_runtime_state(&state);
+    let actor = resolve_actor_from_headers(&headers, &state.config, true)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    let site = request_site(&headers);
+    let session_id = Uuid::new_v4().to_string();
+    let rtc_session_id = Uuid::new_v4().to_string();
+    let mut participants = vec![actor.actor_key.clone()];
+    for participant in body.participants.unwrap_or_default() {
+        if !participants.iter().any(|value| value == &participant) {
+            participants.push(participant);
+        }
+    }
+    let now = now_secs();
+    let ttl = body.ttl_secs.unwrap_or(state.config.media_ttl_secs);
+    let expires_at = now + ttl;
+    let mode = body.mode.unwrap_or(AudioSessionMode::SpeechToSpeech);
+    let capabilities = body.capabilities.unwrap_or(AudioSessionCapabilities {
+        audio_in: true,
+        audio_out: true,
+        partial_transcript: true,
+        interrupt: true,
+    });
+    let backend = body.backend.unwrap_or_else(|| "models_local".to_string());
+
+    let rtc_record = RtcSessionRecord {
+        session_id: rtc_session_id.clone(),
+        site: site.clone(),
+        owner_key: actor.actor_key.clone(),
+        participants: participants.clone(),
+        signals: Vec::new(),
+        next_seq: 0,
+        expires_at_secs: expires_at,
+    };
+    state
+        .rtc_sessions
+        .lock()
+        .expect("rtc sessions lock")
+        .insert(rtc_session_id.clone(), rtc_record);
+
+    let audio_record = AudioSessionRecord {
+        session_id: session_id.clone(),
+        rtc_session_id: rtc_session_id.clone(),
+        site: site.clone(),
+        owner_key: actor.actor_key.clone(),
+        participants,
+        mode,
+        status: AudioSessionStatus::Created,
+        backend,
+        capabilities,
+        events: Vec::new(),
+        next_seq: 0,
+        expires_at_secs: expires_at,
+    };
+    state
+        .audio_sessions
+        .lock()
+        .expect("audio sessions lock")
+        .insert(session_id.clone(), audio_record.clone());
+
+    let mut response_headers = HeaderMap::new();
+    if let Some(cookie) = actor.set_cookie {
+        if let Ok(value) = HeaderValue::from_str(&cookie) {
+            response_headers.insert(SET_COOKIE, value);
+        }
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        response_headers,
+        Json(json!({
+            "status": "ok",
+            "session": audio_session_metadata(&audio_record),
+        })),
+    ))
+}
+
+async fn get_audio_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    purge_expired_runtime_state(&state);
+    let actor = resolve_actor_from_headers(&headers, &state.config, false)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    let site = request_site(&headers);
+    let session = owned_audio_session(&state, &session_id, &site, &actor.actor_key)?;
+    Ok(Json(json!({
+        "status": "ok",
+        "session": audio_session_metadata(&session),
+    })))
+}
+
+async fn delete_audio_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    purge_expired_runtime_state(&state);
+    let actor = resolve_actor_from_headers(&headers, &state.config, false)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    let site = request_site(&headers);
+
+    let session = {
+        let mut sessions = state.audio_sessions.lock().expect("audio sessions lock");
+        let Some(session) = sessions.remove(&session_id) else {
+            return Err(api_error(StatusCode::NOT_FOUND, "AUDIO_SESSION_NOT_FOUND"));
+        };
+        if session.site != site {
+            sessions.insert(session_id.clone(), session);
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "AUDIO_SESSION_SITE_MISMATCH",
+            ));
+        }
+        if session.owner_key != actor.actor_key
+            && !session
+                .participants
+                .iter()
+                .any(|participant| participant == &actor.actor_key)
+        {
+            sessions.insert(session_id.clone(), session);
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "AUDIO_SESSION_ACCESS_DENIED",
+            ));
+        }
+        session
+    };
+
+    state
+        .rtc_sessions
+        .lock()
+        .expect("rtc sessions lock")
+        .remove(&session.rtc_session_id);
+
+    emit_server_event(
+        &state,
+        "AUDIO_SESSION_DELETED",
+        json!({"audioSessionId": session_id, "site": site}),
+    );
+
+    Ok(Json(json!({ "status": "ok", "deleted": true })))
+}
+
+async fn post_audio_session_command(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(body): Json<AudioSessionCommandRequest>,
+) -> ApiResult<Json<Value>> {
+    purge_expired_runtime_state(&state);
+    let actor = resolve_actor_from_headers(&headers, &state.config, false)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    let site = request_site(&headers);
+    let session = owned_audio_session(&state, &session_id, &site, &actor.actor_key)?;
+    let backend_ctx = BackendContext {
+        site: site.clone(),
+        actor_key: Some(actor.actor_key.clone()),
+        connection_id: None,
+        ip: Some(connection_ip_from_headers(&headers)),
+        user_agent: headers
+            .get("user-agent")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_string()),
+        user: Some(BackendUser {
+            id: actor.user_id.clone(),
+            role: actor.role.clone(),
+        }),
+    };
+
+    let intent_name = match body.command.as_str() {
+        "start" => "models.local.audio.session.start",
+        "stop" => "models.local.audio.session.stop",
+        _ => "models.local.audio.session.command",
+    };
+    let event_type = match body.command.as_str() {
+        "start" => "audio.session.started",
+        "stop" => "audio.session.ended",
+        "pause" => "audio.session.paused",
+        "resume" => "audio.session.resumed",
+        "interrupt" => "audio.session.interrupted",
+        "mute_input" => "audio.session.input_muted",
+        "unmute_input" => "audio.session.input_unmuted",
+        _ => "audio.session.command",
+    };
+    let next_status = match body.command.as_str() {
+        "start" => AudioSessionStatus::Streaming,
+        "stop" => AudioSessionStatus::Ended,
+        "pause" => AudioSessionStatus::Paused,
+        "resume" => AudioSessionStatus::Streaming,
+        _ => session.status.clone(),
+    };
+
+    let backend_response = if state.backend.is_configured() {
+        let intent = json!({
+            "id": format!("audio-session:{}:{}", session_id, Uuid::new_v4()),
+            "intent": intent_name,
+            "payload": {
+                "audioSessionId": session_id,
+                "rtcSessionId": session.rtc_session_id,
+                "command": body.command,
+                "payload": body.payload.clone().unwrap_or_else(|| json!({})),
+            },
+            "meta": {
+                "clock": now_millis(),
+                "channels": [audio_channel_name(&session_id)],
+                "ephemeral": true,
+            }
+        });
+        Some(
+            state
+                .backend
+                .apply_intents(vec![intent], &backend_ctx)
+                .await
+                .map_err(|_| api_error(StatusCode::BAD_GATEWAY, "BACKEND_AUDIO_COMMAND_FAILED"))?,
+        )
+    } else {
+        None
+    };
+
+    let event = {
+        let mut sessions = state.audio_sessions.lock().expect("audio sessions lock");
+        let session = sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "AUDIO_SESSION_NOT_FOUND"))?;
+        session.status = next_status;
+        append_audio_session_event(
+            session,
+            event_type.to_string(),
+            json!({
+                "audioSessionId": session_id,
+                "rtcSessionId": session.rtc_session_id,
+                "command": body.command,
+                "payload": body.payload.unwrap_or_else(|| json!({})),
+            }),
+        )
+    };
+    broadcast_app_event(
+        &state,
+        audio_session_broadcast_event(&site, &session_id, &event),
+    );
+
+    Ok(Json(json!({
+        "status": "ok",
+        "session": audio_session_metadata(&owned_audio_session(&state, &session_id, &site, &actor.actor_key)?),
+        "backend": backend_response.unwrap_or_else(|| json!({"status":"ok","results":[]}))
+    })))
 }
 
 async fn post_rtc_signal(
@@ -1341,6 +1675,11 @@ async fn handle_channel_subscribe(
         if let Some((rtc_intents, rtc_cursor)) = rtc_snapshot_for_channel(state, channel, 0) {
             snapshot_cursor = rtc_cursor;
             rtc_intents
+        } else if let Some((audio_intents, audio_cursor)) =
+            audio_snapshot_for_channel(state, channel, 0)
+        {
+            snapshot_cursor = audio_cursor;
+            audio_intents
         } else if state.backend.is_configured() {
             let backend_ctx = BackendContext {
                 site: context.site.clone(),
@@ -1449,6 +1788,10 @@ async fn handle_channel_resync(
     let (intents, next) =
         if let Some((rtc_intents, rtc_cursor)) = rtc_snapshot_for_channel(state, channel, cursor) {
             (rtc_intents, rtc_cursor)
+        } else if let Some((audio_intents, audio_cursor)) =
+            audio_snapshot_for_channel(state, channel, cursor)
+        {
+            (audio_intents, audio_cursor)
         } else {
             let intents = store_entries_for_channel_after(state, channel, cursor, 200);
             let next = intents.last().map(|entry| entry.log_seq).unwrap_or(cursor);
@@ -1569,6 +1912,22 @@ async fn sse_events(
 }
 
 fn publish_backend_event(state: &Arc<AppState>, event: &Value) {
+    if let Some(event_type) = event.get("eventType").and_then(|v| v.as_str()) {
+        if let Some(audio_session_id) = event.get("audioSessionId").and_then(|v| v.as_str()) {
+            let site = event
+                .get("site")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default")
+                .to_string();
+            let payload = event.get("payload").cloned().unwrap_or_else(|| json!({}));
+            if let Some(broadcast) =
+                record_backend_audio_event(state, &site, audio_session_id, event_type, payload)
+            {
+                broadcast_app_event(state, broadcast);
+            }
+            return;
+        }
+    }
     let reason = event
         .get("reason")
         .and_then(|v| v.as_str())
@@ -1954,10 +2313,31 @@ fn purge_expired_runtime_state(state: &Arc<AppState>) {
         let mut sessions = state.rtc_sessions.lock().expect("rtc sessions lock");
         sessions.retain(|_, session| session.expires_at_secs > now);
     }
+    {
+        let mut sessions = state.audio_sessions.lock().expect("audio sessions lock");
+        let mut expired_rtc_sessions = Vec::new();
+        sessions.retain(|_, session| {
+            let keep = session.expires_at_secs > now;
+            if !keep {
+                expired_rtc_sessions.push(session.rtc_session_id.clone());
+            }
+            keep
+        });
+        if !expired_rtc_sessions.is_empty() {
+            let mut rtc_sessions = state.rtc_sessions.lock().expect("rtc sessions lock");
+            for rtc_id in expired_rtc_sessions {
+                rtc_sessions.remove(&rtc_id);
+            }
+        }
+    }
 }
 
 fn rtc_channel_name(session_id: &str) -> String {
     format!("rtc.session.{}", session_id)
+}
+
+fn audio_channel_name(session_id: &str) -> String {
+    format!("audio.session.{}", session_id)
 }
 
 fn rtc_signal_event_intent(session_id: &str, signal: &RtcSignalRecord, channel: &str) -> Value {
@@ -2002,6 +2382,158 @@ fn rtc_snapshot_for_channel(
         .map(|signal| signal.seq)
         .unwrap_or(cursor);
     Some((intents, next))
+}
+
+fn audio_session_metadata(session: &AudioSessionRecord) -> Value {
+    json!({
+        "audioSessionId": session.session_id,
+        "rtcSessionId": session.rtc_session_id,
+        "channel": audio_channel_name(&session.session_id),
+        "rtcChannel": rtc_channel_name(&session.rtc_session_id),
+        "site": session.site,
+        "mode": session.mode,
+        "status": session.status,
+        "backend": session.backend,
+        "capabilities": session.capabilities,
+        "participants": session.participants,
+        "expiresAt": session.expires_at_secs,
+    })
+}
+
+fn owned_audio_session(
+    state: &Arc<AppState>,
+    session_id: &str,
+    site: &str,
+    actor_key: &str,
+) -> ApiResult<AudioSessionRecord> {
+    let sessions = state.audio_sessions.lock().expect("audio sessions lock");
+    let Some(session) = sessions.get(session_id).cloned() else {
+        return Err(api_error(StatusCode::NOT_FOUND, "AUDIO_SESSION_NOT_FOUND"));
+    };
+    if session.site != site {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "AUDIO_SESSION_SITE_MISMATCH",
+        ));
+    }
+    if session.owner_key != actor_key
+        && !session
+            .participants
+            .iter()
+            .any(|participant| participant == actor_key)
+    {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "AUDIO_SESSION_ACCESS_DENIED",
+        ));
+    }
+    Ok(session)
+}
+
+fn append_audio_session_event(
+    session: &mut AudioSessionRecord,
+    event_type: String,
+    payload: Value,
+) -> AudioSessionEventRecord {
+    session.next_seq += 1;
+    let event = AudioSessionEventRecord {
+        seq: session.next_seq,
+        event_type,
+        payload,
+        created_at_ms: now_millis(),
+    };
+    session.events.push(event.clone());
+    if session.events.len() > 128 {
+        let overflow = session.events.len() - 128;
+        session.events.drain(0..overflow);
+    }
+    event
+}
+
+fn audio_session_event_intent(
+    session_id: &str,
+    event: &AudioSessionEventRecord,
+    channel: &str,
+) -> Value {
+    json!({
+        "id": format!("audio:{}:{}", session_id, event.seq),
+        "intent": event.event_type,
+        "payload": {
+            "audioSessionId": session_id,
+            "eventType": event.event_type,
+            "payload": event.payload,
+            "createdAt": event.created_at_ms,
+            "seq": event.seq,
+        },
+        "meta": {
+            "channels": [channel],
+            "ephemeral": true,
+        },
+        "insertedAt": event.created_at_ms,
+        "logSeq": event.seq,
+    })
+}
+
+fn audio_session_broadcast_event(
+    site: &str,
+    session_id: &str,
+    event: &AudioSessionEventRecord,
+) -> Value {
+    let channel = audio_channel_name(session_id);
+    json!({
+        "type": "invalidate",
+        "reason": "audio-session-event",
+        "site": site,
+        "cursor": event.seq,
+        "intents": [audio_session_event_intent(session_id, event, &channel)],
+    })
+}
+
+fn audio_snapshot_for_channel(
+    state: &Arc<AppState>,
+    channel: &str,
+    cursor: u64,
+) -> Option<(Vec<Value>, u64)> {
+    let session_id = channel.strip_prefix("audio.session.")?;
+    let sessions = state.audio_sessions.lock().expect("audio sessions lock");
+    let session = sessions.get(session_id)?;
+    let intents = session
+        .events
+        .iter()
+        .filter(|event| event.seq > cursor)
+        .map(|event| audio_session_event_intent(&session.session_id, event, channel))
+        .collect::<Vec<_>>();
+    let next = session
+        .events
+        .last()
+        .map(|event| event.seq)
+        .unwrap_or(cursor);
+    Some((intents, next))
+}
+
+fn record_backend_audio_event(
+    state: &Arc<AppState>,
+    site: &str,
+    session_id: &str,
+    event_type: &str,
+    payload: Value,
+) -> Option<Value> {
+    let event = {
+        let mut sessions = state.audio_sessions.lock().expect("audio sessions lock");
+        let session = sessions.get_mut(session_id)?;
+        let next_status = match event_type {
+            "audio.session.started" => Some(AudioSessionStatus::Streaming),
+            "audio.session.ended" => Some(AudioSessionStatus::Ended),
+            "audio.session.error" => Some(AudioSessionStatus::Error),
+            "audio.session.interrupted" => Some(AudioSessionStatus::Paused),
+            _ => None,
+        };
+        if let Some(status) = next_status {
+            session.status = status;
+        }
+        append_audio_session_event(session, event_type.to_string(), payload)
+    };
+    Some(audio_session_broadcast_event(site, session_id, &event))
 }
 
 fn resolve_user_from_headers(headers: &HeaderMap, config: &Config) -> Option<ResolvedUser> {
@@ -2067,7 +2599,7 @@ fn is_sse_event_authorized(
 ) -> bool {
     if extract_event_channels(event)
         .iter()
-        .any(|channel| channel.starts_with("rtc.session."))
+        .any(|channel| channel.starts_with("rtc.session.") || channel.starts_with("audio.session."))
     {
         return false;
     }
@@ -2174,6 +2706,21 @@ fn consume_global_rate_limit(state: &Arc<AppState>, key: String, max: u32, windo
 }
 
 fn can_access_channel(state: &Arc<AppState>, channel: &str, context: &ConnectionContext) -> bool {
+    if let Some(session_id) = channel.strip_prefix("audio.session.") {
+        let Some(actor_key) = &context.actor_key else {
+            return false;
+        };
+        let sessions = state.audio_sessions.lock().expect("audio sessions lock");
+        let Some(session) = sessions.get(session_id) else {
+            return false;
+        };
+        return session.site == context.site
+            && (session.owner_key == *actor_key
+                || session
+                    .participants
+                    .iter()
+                    .any(|participant| participant == actor_key));
+    }
     if let Some(session_id) = channel.strip_prefix("rtc.session.") {
         let Some(actor_key) = &context.actor_key else {
             return false;
