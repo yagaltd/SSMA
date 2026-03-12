@@ -63,10 +63,7 @@ pub fn validate_inbound(payload: &Value) -> Result<(), String> {
     match validator.validate(payload) {
         Ok(_) => Ok(()),
         Err(errors) => {
-            let details = errors
-                .map(|err| err.to_string())
-                .collect::<Vec<_>>()
-                .join("; ");
+            let details = errors.map(|err| err.to_string()).collect::<Vec<_>>().join("; ");
             Err(details)
         }
     }

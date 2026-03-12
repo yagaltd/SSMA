@@ -6,9 +6,7 @@ use tokio::time::{timeout, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
-async fn spawn_gateway(
-    mut config: ssma_rust::runtime::Config,
-) -> Result<(String, tokio::task::JoinHandle<()>)> {
+async fn spawn_gateway(mut config: ssma_rust::runtime::Config) -> Result<(String, tokio::task::JoinHandle<()>)> {
     config.host = "127.0.0.1".to_string();
     config.port = 0;
     config.backend_url = "".to_string();
@@ -23,9 +21,7 @@ async fn spawn_gateway(
 }
 
 async fn ws_wait_for(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     ty: &str,
 ) -> Result<Value> {
     let deadline = Duration::from_secs(12);
@@ -56,16 +52,9 @@ async fn conformance_vectors_replayed_against_runtime() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // ws_handshake
-    let (mut ws, _) = connect_async(format!(
-        "ws://{}/optimistic/ws?role=leader&site=default&subprotocol=1.0.0",
-        base
-    ))
-    .await?;
+    let (mut ws, _) = connect_async(format!("ws://{}/optimistic/ws?role=leader&site=default&subprotocol=1.0.0", base)).await?;
     let hello = ws_wait_for(&mut ws, "hello").await?;
-    assert_eq!(
-        hello.get("subprotocol").and_then(|v| v.as_str()),
-        Some("1.0.0")
-    );
+    assert_eq!(hello.get("subprotocol").and_then(|v| v.as_str()), Some("1.0.0"));
     let _ = ws_wait_for(&mut ws, "replay").await?;
 
     // intent_batch_ack
@@ -88,8 +77,7 @@ async fn conformance_vectors_replayed_against_runtime() -> Result<()> {
 
     // channel_subscribe_snapshot
     ws.send(Message::Text(
-        serde_json::json!({ "type": "channel.subscribe", "channel": "global", "params": {} })
-            .to_string(),
+        serde_json::json!({ "type": "channel.subscribe", "channel": "global", "params": {} }).to_string(),
     ))
     .await?;
     let _ = ws_wait_for(&mut ws, "channel.ack").await?;
@@ -97,8 +85,7 @@ async fn conformance_vectors_replayed_against_runtime() -> Result<()> {
 
     // rate_limit_channel_subscribe
     ws.send(Message::Text(
-        serde_json::json!({ "type": "channel.subscribe", "channel": "global", "params": {} })
-            .to_string(),
+        serde_json::json!({ "type": "channel.subscribe", "channel": "global", "params": {} }).to_string(),
     ))
     .await?;
     let maybe_rate = ws_wait_for(&mut ws, "channel.ack").await?;
@@ -113,11 +100,7 @@ async fn conformance_vectors_replayed_against_runtime() -> Result<()> {
     auth_cfg.require_auth_for_writes = true;
     let (base2, handle2) = spawn_gateway(auth_cfg).await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let (mut unauth, _) = connect_async(format!(
-        "ws://{}/optimistic/ws?role=leader&site=default&subprotocol=1.0.0",
-        base2
-    ))
-    .await?;
+    let (mut unauth, _) = connect_async(format!("ws://{}/optimistic/ws?role=leader&site=default&subprotocol=1.0.0", base2)).await?;
     let _ = ws_wait_for(&mut unauth, "hello").await?;
     let _ = ws_wait_for(&mut unauth, "replay").await?;
     unauth
@@ -138,11 +121,7 @@ async fn conformance_vectors_replayed_against_runtime() -> Result<()> {
     assert_eq!(err["code"], "UNAUTHORIZED");
 
     // subprotocol mismatch shape parity
-    let (mut mismatch, _) = connect_async(format!(
-        "ws://{}/optimistic/ws?role=leader&site=default&subprotocol=2.0.0",
-        base2
-    ))
-    .await?;
+    let (mut mismatch, _) = connect_async(format!("ws://{}/optimistic/ws?role=leader&site=default&subprotocol=2.0.0", base2)).await?;
     let mismatch_error = ws_wait_for(&mut mismatch, "error").await?;
     assert_eq!(mismatch_error["code"], "SUBPROTOCOL_MISMATCH");
 
