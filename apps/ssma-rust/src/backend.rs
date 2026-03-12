@@ -11,6 +11,7 @@ pub struct BackendUser {
 #[serde(rename_all = "camelCase")]
 pub struct BackendContext {
     pub site: String,
+    pub actor_key: Option<String>,
     pub connection_id: Option<String>,
     pub ip: Option<String>,
     pub user_agent: Option<String>,
@@ -43,10 +44,13 @@ impl BackendHttpClient {
         if !self.is_configured() {
             return Ok(serde_json::json!({ "results": [] }));
         }
-        self.post_json("/apply-intents", serde_json::json!({
-            "intents": intents,
-            "context": context
-        }))
+        self.post_json(
+            "/apply-intents",
+            serde_json::json!({
+                "intents": intents,
+                "context": context
+            }),
+        )
         .await
     }
 
@@ -86,7 +90,8 @@ impl BackendHttpClient {
         if !self.is_configured() {
             return Ok(serde_json::json!({ "status": "ok", "backend": "unconfigured" }));
         }
-        self.post_json("/health", serde_json::json!({ "context": context })).await
+        self.post_json("/health", serde_json::json!({ "context": context }))
+            .await
     }
 
     async fn post_json(&self, path: &str, payload: Value) -> Result<Value, reqwest::Error> {

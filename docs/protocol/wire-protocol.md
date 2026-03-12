@@ -46,6 +46,7 @@ Session A rule:
 
 | Route | Purpose |
 |---|---|
+| `POST /query/:name` | Public request/response query path that forwards to the configured backend adapter. |
 | `POST /media/assets` | Upload binary image/audio and receive an `assetId`. |
 | `GET /media/assets/:assetId` | Asset metadata for the current owner/session. |
 | `GET /media/assets/:assetId/content` | Raw asset bytes for the current owner/session. |
@@ -54,9 +55,15 @@ Session A rule:
 | `POST /rtc/sessions/:sessionId/signals` | Submit an offer/answer/candidate-style signal payload. |
 
 Internal adapter fetch:
+- `POST /internal/assets`
 - `GET /internal/assets/:assetId`
 - `GET /internal/assets/:assetId/content`
+- `DELETE /internal/assets/:assetId`
 - Both require `x-ssma-backend-token`.
+
+Session A follow-up rule:
+- public queries forward `ctx.actorKey` so adapters can create backend-generated assets owned by the same caller
+- backend-created assets use `/internal/assets` and become readable through normal `/media/assets/:assetId/content`
 
 ## Error codes
 

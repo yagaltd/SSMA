@@ -7,7 +7,7 @@ SSMA is backend-agnostic and communicates through a narrow internal adapter cont
 ### `applyIntents(batch, ctx)`
 - Input:
   - `batch`: array of persisted intent entries (`id`, `intent`, `payload`, `meta`, `logSeq`, `site`)
-  - `ctx`: `{ site, connectionId, ip, userAgent, user }`
+  - `ctx`: `{ site, actorKey, connectionId, ip, userAgent, user }`
   - `user`: `null` for guests, otherwise `{ id, role }`
 - Output:
   - `{ results, events }`
@@ -45,6 +45,7 @@ Default mapping used by both runtimes:
 Runtime note:
 - JS and Rust serialize the adapter context in the same camelCase JSON shape.
 - Backends should treat `ctx.user` as the canonical auth envelope instead of reading transport-specific cookies.
+- `ctx.actorKey` is the stable ownership key for anonymous or authenticated callers and is required when backends create SSMA-owned output assets.
 
 ## Media-bearing workloads
 
@@ -52,8 +53,10 @@ Runtime note:
 - SSMA returns gateway-owned `assetId` handles.
 - Intents/queries that reference media should carry `assetRefs[]`, not raw or base64 payloads.
 - Backend adapters resolve asset refs through SSMA internal routes:
+  - `POST /internal/assets`
   - `GET /internal/assets/:assetId`
   - `GET /internal/assets/:assetId/content`
+  - `DELETE /internal/assets/:assetId`
 - Internal asset routes are protected by `x-ssma-backend-token`.
 
 Session A note:

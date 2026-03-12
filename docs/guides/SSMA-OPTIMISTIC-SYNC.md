@@ -4,6 +4,7 @@ This guide documents how the SSMA backend ingests optimistic actions from CSMA c
 
 Session A addendum for `ssma-rust`:
 - SSMA itself now owns media upload/download for frontend clients.
+- SSMA exposes a public request/response query lane at `POST /query/:name`.
 - Backend adapters consume `assetId` references and fetch media through backend-token-protected internal SSMA routes.
 - RTC signaling is handled as an ephemeral channel workflow, not a persisted optimistic intent workflow.
 
@@ -86,6 +87,7 @@ SSMA uses one session-token contract everywhere:
 
 ## Media lane (Rust Session A)
 
+- `POST /query/:name`
 - `POST /media/assets`
 - `GET /media/assets/:assetId`
 - `GET /media/assets/:assetId/content`
@@ -98,9 +100,16 @@ The media lane is gateway-owned:
 - Session A does not guarantee asset durability across gateway restart
 
 Backend-only asset fetch:
+- `POST /internal/assets`
 - `GET /internal/assets/:assetId`
 - `GET /internal/assets/:assetId/content`
+- `DELETE /internal/assets/:assetId`
 - requires `x-ssma-backend-token`
+
+Backend-created asset rule:
+- adapters receive `ctx.actorKey` in backend calls
+- adapters that generate output media create gateway-owned assets through `POST /internal/assets`
+- the same caller then reads the output through normal public `/media/assets/:assetId/content`
 
 ## RTC signaling lane (Rust Session A)
 

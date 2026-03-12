@@ -147,6 +147,11 @@ struct BackendEventsPayload {
     event: Option<Value>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PublicQueryRequest {
+    payload: Value,
+}
+
 #[derive(Debug, Clone)]
 struct ConnectionContext {
     transport_role: String,
@@ -217,6 +222,7 @@ pub fn build_state(config: Config) -> Arc<AppState> {
 pub fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/query/:name", post(public_query))
         .route("/media/assets", post(upload_media))
         .route(
             "/media/assets/:asset_id",
@@ -229,9 +235,10 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/optimistic/ws", get(ws_upgrade))
         .route("/optimistic/events", get(sse_events))
         .route("/internal/backend/events", post(backend_events_ingest))
+        .route("/internal/assets", post(create_internal_asset))
         .route(
             "/internal/assets/:asset_id",
-            get(get_internal_asset_metadata),
+            get(get_internal_asset_metadata).delete(delete_internal_asset),
         )
         .route(
             "/internal/assets/:asset_id/content",
@@ -294,6 +301,52 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Json<Value> {
 
 type ApiError = (StatusCode, Json<Value>);
 type ApiResult<T> = Result<T, ApiError>;
+
+async fn public_query(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<PublicQueryRequest>,
+) -> ApiResult<impl IntoResponse> {
+    purge_expired_runtime_state(&state);
+    let actor = resolve_actor_from_headers(&headers, &state.config, true)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    let site = request_site(&headers);
+    let backend_ctx = BackendContext {
+        site,
+        actor_key: Some(actor.actor_key.clone()),
+        connection_id: None,
+        ip: Some(connection_ip_from_headers(&headers)),
+        user_agent: headers
+            .get("user-agent")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_string()),
+        user: Some(BackendUser {
+            id: actor.user_id.clone(),
+            role: actor.role.clone(),
+        }),
+    };
+
+    let response = state
+        .backend
+        .query(&name, body.payload, &backend_ctx)
+        .await
+        .map_err(|_| api_error(StatusCode::BAD_GATEWAY, "BACKEND_QUERY_FAILED"))?;
+
+    let normalized = match response {
+        Value::Object(ref object) if object.contains_key("status") => response,
+        other => json!({ "status": "ok", "data": other }),
+    };
+
+    let mut response_headers = HeaderMap::new();
+    if let Some(cookie) = actor.set_cookie {
+        if let Ok(value) = HeaderValue::from_str(&cookie) {
+            response_headers.insert(SET_COOKIE, value);
+        }
+    }
+
+    Ok((StatusCode::OK, response_headers, Json(normalized)))
+}
 
 async fn upload_media(
     State(state): State<Arc<AppState>>,
@@ -445,6 +498,158 @@ async fn delete_asset(
     Ok(Json(json!({ "status": "ok", "deleted": true })))
 }
 
+async fn create_internal_asset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> ApiResult<impl IntoResponse> {
+    purge_expired_runtime_state(&state);
+    ensure_backend_token(&headers, &state.config)?;
+
+    let mut site: Option<String> = None;
+    let mut actor_key: Option<String> = None;
+    let mut media_type: Option<String> = None;
+    let mut mime_type: Option<String> = None;
+    let mut file_name: Option<String> = None;
+    let mut ttl_secs: Option<u64> = None;
+    let mut selected: Option<Vec<u8>> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
+        match field.name() {
+            Some("file") => {
+                if file_name.is_none() {
+                    file_name = field.file_name().map(|value| value.to_string());
+                }
+                if mime_type.is_none() {
+                    mime_type = field.content_type().map(|value| value.to_string());
+                }
+                let bytes = field.bytes().await.map_err(multipart_error)?;
+                if bytes.is_empty() {
+                    continue;
+                }
+                selected = Some(bytes.to_vec());
+            }
+            Some("site") => {
+                site = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(multipart_error)?
+                        .trim()
+                        .to_string(),
+                );
+            }
+            Some("actorKey") => {
+                actor_key = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(multipart_error)?
+                        .trim()
+                        .to_string(),
+                );
+            }
+            Some("mediaType") => {
+                media_type = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(multipart_error)?
+                        .trim()
+                        .to_string(),
+                );
+            }
+            Some("mimeType") => {
+                mime_type = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(multipart_error)?
+                        .trim()
+                        .to_string(),
+                );
+            }
+            Some("fileName") => {
+                file_name = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(multipart_error)?
+                        .trim()
+                        .to_string(),
+                );
+            }
+            Some("ttlSecs") => {
+                let value = field.text().await.map_err(multipart_error)?;
+                ttl_secs = value.trim().parse::<u64>().ok();
+            }
+            _ => {
+                let _ = field.bytes().await;
+            }
+        }
+    }
+
+    let bytes = selected.ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "MISSING_MEDIA"))?;
+    if bytes.len() as u64 > state.config.media_max_upload_bytes {
+        return Err(api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "PAYLOAD_TOO_LARGE",
+        ));
+    }
+
+    let site = site
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "MISSING_SITE"))?;
+    let actor_key = actor_key
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "MISSING_ACTOR_KEY"))?;
+    let media_type = media_type
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "MISSING_MEDIA_TYPE"))?;
+    let mime_type = mime_type
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "MISSING_MIME_TYPE"))?;
+
+    let asset_id = Uuid::new_v4().to_string();
+    let path = state
+        .config
+        .media_storage_root
+        .join(format!("{}.bin", &asset_id));
+    fs::write(&path, &bytes)
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "ASSET_WRITE_FAILED"))?;
+
+    let now = now_secs();
+    let record = AssetRecord {
+        asset_id: asset_id.clone(),
+        site: site.clone(),
+        owner_key: actor_key,
+        media_type: media_type.clone(),
+        mime_type,
+        file_name,
+        size_bytes: bytes.len() as u64,
+        path,
+        created_at_secs: now,
+        expires_at_secs: now + ttl_secs.unwrap_or(state.config.media_ttl_secs),
+    };
+    let metadata = asset_metadata(&record);
+    state
+        .assets
+        .lock()
+        .expect("assets lock")
+        .insert(asset_id.clone(), record);
+
+    emit_server_event(
+        &state,
+        "MEDIA_ASSET_CREATED",
+        json!({"assetId": asset_id, "site": site, "mediaType": media_type}),
+    );
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "status": "ok", "asset": metadata })),
+    ))
+}
+
 async fn get_internal_asset_metadata(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -480,6 +685,27 @@ async fn get_internal_asset_content(
             .unwrap_or_else(|_| HeaderValue::from_static("0")),
     );
     Ok((StatusCode::OK, response_headers, bytes))
+}
+
+async fn delete_internal_asset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    purge_expired_runtime_state(&state);
+    ensure_backend_token(&headers, &state.config)?;
+    let record = internal_asset(&state, &asset_id)?;
+    {
+        let mut assets = state.assets.lock().expect("assets lock");
+        assets.remove(&record.asset_id);
+    }
+    let _ = fs::remove_file(&record.path);
+    emit_server_event(
+        &state,
+        "MEDIA_ASSET_DELETED",
+        json!({"assetId": asset_id, "site": record.site}),
+    );
+    Ok(Json(json!({ "status": "ok", "deleted": true })))
 }
 
 async fn create_rtc_session(
@@ -900,6 +1126,7 @@ async fn handle_intent_batch(
         );
         let backend_ctx = BackendContext {
             site: context.site.clone(),
+            actor_key: context.actor_key.clone(),
             connection_id: Some(context.connection_id.clone()),
             ip: Some(context.ip.clone()),
             user_agent: context.user_agent.clone(),
@@ -1117,6 +1344,7 @@ async fn handle_channel_subscribe(
         } else if state.backend.is_configured() {
             let backend_ctx = BackendContext {
                 site: context.site.clone(),
+                actor_key: context.actor_key.clone(),
                 connection_id: Some(context.connection_id.clone()),
                 ip: Some(context.ip.clone()),
                 user_agent: context.user_agent.clone(),

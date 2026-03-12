@@ -5,9 +5,12 @@ This directory contains the Rust optimistic gateway implementation for SSMA prot
 ## Current state
 
 - Runnable Axum gateway runtime
+- Public query endpoint `/query/:name`
 - WS endpoint `/optimistic/ws` and SSE endpoint `/optimistic/events`
 - Metrics endpoint `/optimistic/metrics`
 - Internal backend event ingest endpoint `/internal/backend/events`
+- Public media asset routes `/media/assets/*`
+- Backend asset routes `/internal/assets/*`
 - Strict inbound message validation via shared schemas in `../../packages/ssma-protocol/contracts`
 - File-backed intent store with `(site,id)` dedupe and monotonic `log_seq`
 - Backend HTTP client methods (`apply_intents`, `query`, `subscribe`, `health`)
@@ -55,6 +58,8 @@ This directory contains the Rust optimistic gateway implementation for SSMA prot
    - `curl http://127.0.0.1:5050/health`
 6. Check metrics:
    - `curl http://127.0.0.1:5050/optimistic/metrics`
+7. Query backend through gateway:
+   - `curl -X POST http://127.0.0.1:5050/query/example -H 'content-type: application/json' -d '{"payload":{}}'`
 
 ## Local Validation Commands
 
@@ -74,4 +79,7 @@ From repository root:
 - In restricted/offline environments, `cargo` may fail to download crates from `crates.io`.
 - WS endpoint: `/optimistic/ws`
 - SSE endpoint: `/optimistic/events`
+- Public query endpoint: `/query/:name`
+- Public media routes: `/media/assets`, `/media/assets/:asset_id`, `/media/assets/:asset_id/content`
 - Backend event ingest endpoint: `/internal/backend/events`
+- Backend asset routes: `/internal/assets`, `/internal/assets/:asset_id`, `/internal/assets/:asset_id/content`

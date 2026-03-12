@@ -18,6 +18,8 @@ use tokio_tungstenite::tungstenite::Message;
 struct ToyBackendState {
     seen: Arc<Mutex<HashSet<String>>>,
     apply_count: Arc<Mutex<HashMap<String, usize>>>,
+    gateway_base: Arc<Mutex<Option<String>>>,
+    backend_token: Arc<Mutex<Option<String>>>,
 }
 
 async fn toy_apply(State(state): State<ToyBackendState>, Json(body): Json<Value>) -> Json<Value> {
@@ -70,9 +72,106 @@ async fn toy_metrics(State(state): State<ToyBackendState>) -> Json<Value> {
     Json(json!({"status":"ok","applyCountByIntent":rows}))
 }
 
-async fn toy_query(Path(name): Path<String>) -> Json<Value> {
+async fn toy_query(
+    State(state): State<ToyBackendState>,
+    Path(name): Path<String>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
     if name == "todos" {
         return Json(json!({"status":"ok","data":{"todos":[]}}));
+    }
+    if name == "echo-context" {
+        return Json(json!({"status":"ok","data": body}));
+    }
+    if name == "create-output-asset" {
+        let gateway_base = state
+            .gateway_base
+            .lock()
+            .expect("gateway base lock")
+            .clone();
+        let backend_token = state
+            .backend_token
+            .lock()
+            .expect("backend token lock")
+            .clone();
+
+        let Some(gateway_base) = gateway_base else {
+            return Json(json!({"error":"MISSING_GATEWAY_BASE"}));
+        };
+        let Some(backend_token) = backend_token else {
+            return Json(json!({"error":"MISSING_BACKEND_TOKEN"}));
+        };
+
+        let site = body
+            .get("context")
+            .and_then(|value| value.get("site"))
+            .and_then(Value::as_str)
+            .unwrap_or("default")
+            .to_string();
+        let actor_key = body
+            .get("context")
+            .and_then(|value| value.get("actorKey"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let Some(actor_key) = actor_key else {
+            return Json(json!({"error":"MISSING_ACTOR_KEY"}));
+        };
+
+        let payload = body.get("payload").cloned().unwrap_or_else(|| json!({}));
+        let file_name = payload
+            .get("fileName")
+            .and_then(Value::as_str)
+            .unwrap_or("speech.wav")
+            .to_string();
+        let mime_type = payload
+            .get("mimeType")
+            .and_then(Value::as_str)
+            .unwrap_or("audio/wav")
+            .to_string();
+        let media_type = payload
+            .get("mediaType")
+            .and_then(Value::as_str)
+            .unwrap_or("audio")
+            .to_string();
+        let bytes = payload
+            .get("content")
+            .and_then(Value::as_str)
+            .map(|value| value.as_bytes().to_vec())
+            .unwrap_or_else(|| b"RIFFgenerated-audio".to_vec());
+
+        let form = reqwest::multipart::Form::new()
+            .text("site", site)
+            .text("actorKey", actor_key)
+            .text("mediaType", media_type)
+            .text("mimeType", mime_type.clone())
+            .text("fileName", file_name.clone())
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(bytes)
+                    .file_name(file_name)
+                    .mime_str(&mime_type)
+                    .expect("mime"),
+            );
+        let client = reqwest::Client::new();
+        let response = match client
+            .post(format!("http://{}/internal/assets", gateway_base))
+            .header("x-ssma-backend-token", backend_token)
+            .multipart(form)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => return Json(json!({"error": error.to_string()})),
+        };
+        let status = response.status();
+        let json = match response.json::<Value>().await {
+            Ok(json) => json,
+            Err(error) => return Json(json!({"error": error.to_string()})),
+        };
+        if !status.is_success() {
+            return Json(json!({"error":"INTERNAL_ASSET_CREATE_FAILED","detail":json}));
+        }
+        return Json(json!({"status":"ok","data": json["asset"].clone()}));
     }
     Json(json!({"error":"UNKNOWN_QUERY"}))
 }
@@ -87,6 +186,24 @@ async fn toy_health() -> Json<Value> {
 
 async fn spawn_toy_backend() -> Result<(String, tokio::task::JoinHandle<()>)> {
     let state = ToyBackendState::default();
+    let app = Router::new()
+        .route("/apply-intents", post(toy_apply))
+        .route("/metrics", get(toy_metrics))
+        .route("/query/:name", post(toy_query))
+        .route("/subscribe", post(toy_subscribe))
+        .route("/health", get(toy_health).post(toy_health))
+        .with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    Ok((format!("http://127.0.0.1:{}", addr.port()), handle))
+}
+
+async fn spawn_toy_backend_with_state(
+    state: ToyBackendState,
+) -> Result<(String, tokio::task::JoinHandle<()>)> {
     let app = Router::new()
         .route("/apply-intents", post(toy_apply))
         .route("/metrics", get(toy_metrics))
@@ -745,6 +862,133 @@ async fn media_assets_enforce_cookie_ownership_and_backend_token() -> Result<()>
     assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
 
     gateway_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn public_query_issues_cookie_and_forwards_actor_context() -> Result<()> {
+    let (backend_base, backend_handle) = spawn_toy_backend().await?;
+    let (gateway_base, gateway_handle) = spawn_gateway(backend_base, false).await?;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(format!("http://{}/query/echo-context", gateway_base))
+        .header("user-agent", "cargo-test-query")
+        .json(&json!({ "payload": { "message": "hello" } }))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let anon_cookie = extract_cookie(&response, "ssma_anon").expect("anonymous cookie");
+    let json = response.json::<Value>().await?;
+
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["data"]["payload"]["message"], "hello");
+    assert_eq!(json["data"]["context"]["site"], "default");
+    assert_eq!(json["data"]["context"]["user"]["role"], "guest");
+    assert_eq!(json["data"]["context"]["user"]["id"], Value::Null);
+    assert!(json["data"]["context"]["actorKey"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("anon:"));
+
+    let query_with_cookie = client
+        .post(format!("http://{}/query/echo-context", gateway_base))
+        .header("Cookie", &anon_cookie)
+        .json(&json!({ "payload": { "message": "again" } }))
+        .send()
+        .await?;
+    assert_eq!(query_with_cookie.status(), reqwest::StatusCode::OK);
+    let with_cookie_json = query_with_cookie.json::<Value>().await?;
+    assert_eq!(
+        with_cookie_json["data"]["context"]["actorKey"],
+        json["data"]["context"]["actorKey"]
+    );
+
+    gateway_handle.abort();
+    backend_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn backend_created_assets_are_publicly_readable_by_same_actor_via_query() -> Result<()> {
+    let backend_state = ToyBackendState::default();
+    {
+        *backend_state
+            .backend_token
+            .lock()
+            .expect("backend token lock") = Some("test-backend-token".to_string());
+    }
+    let (backend_base, backend_handle) =
+        spawn_toy_backend_with_state(backend_state.clone()).await?;
+    let (gateway_base, gateway_handle) = spawn_gateway_with(backend_base, false, |config| {
+        config.backend_internal_token = "test-backend-token".to_string();
+    })
+    .await?;
+    {
+        *backend_state
+            .gateway_base
+            .lock()
+            .expect("gateway base lock") = Some(gateway_base.clone());
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{}/query/create-output-asset", gateway_base))
+        .json(&json!({
+            "payload": {
+                "fileName": "speech.wav",
+                "mimeType": "audio/wav",
+                "mediaType": "audio",
+                "content": "RIFFgenerated-audio"
+            }
+        }))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let anon_cookie = extract_cookie(&response, "ssma_anon").expect("anonymous cookie");
+    let json = response.json::<Value>().await?;
+    let asset_id = json["data"]["assetId"]
+        .as_str()
+        .expect("asset id")
+        .to_string();
+    assert_eq!(json["data"]["mediaType"], "audio");
+
+    let metadata = client
+        .get(format!("http://{}/media/assets/{}", gateway_base, asset_id))
+        .header("Cookie", &anon_cookie)
+        .send()
+        .await?;
+    assert_eq!(metadata.status(), reqwest::StatusCode::OK);
+
+    let content = client
+        .get(format!(
+            "http://{}/media/assets/{}/content",
+            gateway_base, asset_id
+        ))
+        .header("Cookie", &anon_cookie)
+        .send()
+        .await?;
+    assert_eq!(content.status(), reqwest::StatusCode::OK);
+    assert_eq!(content.bytes().await?.as_ref(), b"RIFFgenerated-audio");
+
+    let denied = client
+        .get(format!("http://{}/media/assets/{}", gateway_base, asset_id))
+        .send()
+        .await?;
+    assert_eq!(denied.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let internal_deleted = client
+        .delete(format!(
+            "http://{}/internal/assets/{}",
+            gateway_base, asset_id
+        ))
+        .header("x-ssma-backend-token", "test-backend-token")
+        .send()
+        .await?;
+    assert_eq!(internal_deleted.status(), reqwest::StatusCode::OK);
+
+    gateway_handle.abort();
+    backend_handle.abort();
     Ok(())
 }
 

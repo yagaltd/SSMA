@@ -47,7 +47,10 @@ fn intent_store_assigns_monotonic_cursor() -> Result<()> {
 
 #[test]
 fn intent_store_dedupes_by_site_and_id() -> Result<()> {
-    let path = std::env::temp_dir().join(format!("ssma-rust-store-dedupe-{}.json", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "ssma-rust-store-dedupe-{}.json",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&path);
     let store = ssma_rust::runtime::IntentStore::new(path.clone(), 300_000);
     let now = ssma_rust::runtime::now_millis();
@@ -116,9 +119,11 @@ async fn backend_client_uses_canonical_context_shape() -> Result<()> {
         let _ = axum::serve(listener, app).await;
     });
 
-    let client = ssma_rust::backend::BackendHttpClient::new(format!("http://127.0.0.1:{}", addr.port()));
+    let client =
+        ssma_rust::backend::BackendHttpClient::new(format!("http://127.0.0.1:{}", addr.port()));
     let context = ssma_rust::backend::BackendContext {
         site: "default".to_string(),
+        actor_key: Some("anon:session-1".to_string()),
         connection_id: Some("conn-1".to_string()),
         ip: Some("127.0.0.1".to_string()),
         user_agent: Some("cargo-test".to_string()),
@@ -150,6 +155,7 @@ async fn backend_client_uses_canonical_context_shape() -> Result<()> {
         payload.get("context"),
         Some(&json!({
             "site": "default",
+            "actorKey": "anon:session-1",
             "connectionId": "conn-1",
             "ip": "127.0.0.1",
             "userAgent": "cargo-test",
