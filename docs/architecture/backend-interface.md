@@ -46,6 +46,20 @@ Runtime note:
 - JS and Rust serialize the adapter context in the same camelCase JSON shape.
 - Backends should treat `ctx.user` as the canonical auth envelope instead of reading transport-specific cookies.
 
+## Media-bearing workloads
+
+- Frontends upload binary image/audio files to SSMA, not to adapters.
+- SSMA returns gateway-owned `assetId` handles.
+- Intents/queries that reference media should carry `assetRefs[]`, not raw or base64 payloads.
+- Backend adapters resolve asset refs through SSMA internal routes:
+  - `GET /internal/assets/:assetId`
+  - `GET /internal/assets/:assetId/content`
+- Internal asset routes are protected by `x-ssma-backend-token`.
+
+Session A note:
+- Rust runtime implements the SSMA-owned media boundary and internal asset fetch contract.
+- JS runtime parity is still pending.
+
 ## Failure semantics
 
 - Transport/5xx failures map to `failed` intent status in SSMA ACKs.

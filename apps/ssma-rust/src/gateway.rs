@@ -1,20 +1,23 @@
 use crate::backend::{BackendContext, BackendHttpClient, BackendUser};
 use crate::protocol;
-use crate::runtime::{now_millis, Config, IntentRecord, IntentStore};
+use crate::runtime::{now_millis, now_secs, Config, IntentRecord, IntentStore};
 use async_stream::stream;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
+use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, SET_COOKIE};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
@@ -26,10 +29,69 @@ pub struct AppState {
     pub store: IntentStore,
     pub backend: BackendHttpClient,
     pub events: broadcast::Sender<Value>,
+    assets: Arc<Mutex<HashMap<String, AssetRecord>>>,
+    rtc_sessions: Arc<Mutex<HashMap<String, RtcSessionRecord>>>,
     channel_limits: Arc<Mutex<HashMap<String, RateBucket>>>,
     global_limits: Arc<Mutex<HashMap<String, RateBucket>>>,
     channel_registry: Arc<Mutex<HashMap<String, ConnectionChannels>>>,
     metrics: Arc<MetricsState>,
+}
+
+#[derive(Debug, Clone)]
+struct AssetRecord {
+    asset_id: String,
+    site: String,
+    owner_key: String,
+    media_type: String,
+    mime_type: String,
+    file_name: Option<String>,
+    size_bytes: u64,
+    path: PathBuf,
+    created_at_secs: u64,
+    expires_at_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+struct RtcSignalRecord {
+    seq: u64,
+    kind: String,
+    sender_id: String,
+    target_id: Option<String>,
+    payload: Value,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+struct RtcSessionRecord {
+    session_id: String,
+    site: String,
+    owner_key: String,
+    participants: Vec<String>,
+    signals: Vec<RtcSignalRecord>,
+    next_seq: u64,
+    expires_at_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ActorIdentity {
+    actor_key: String,
+    actor_id: String,
+    role: String,
+    user_id: Option<String>,
+    set_cookie: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetMetadata {
+    asset_id: String,
+    site: String,
+    media_type: String,
+    mime_type: String,
+    file_name: Option<String>,
+    size_bytes: u64,
+    created_at: u64,
+    expires_at: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +153,7 @@ struct ConnectionContext {
     auth_role: String,
     site: String,
     connection_id: String,
+    actor_key: Option<String>,
     user_id: Option<String>,
     ip: String,
     user_agent: Option<String>,
@@ -108,7 +171,32 @@ struct ResolvedUser {
     role: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateRtcSessionRequest {
+    participants: Option<Vec<String>>,
+    ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PostRtcSignalRequest {
+    kind: String,
+    sender_id: String,
+    target_id: Option<String>,
+    payload: Value,
+}
+
 pub fn build_state(config: Config) -> Arc<AppState> {
+    let _ = fs::create_dir_all(&config.media_storage_root);
+    if let Ok(entries) = fs::read_dir(&config.media_storage_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
     let store = IntentStore::new(config.intent_store_path.clone(), config.replay_window_ms);
     let backend = BackendHttpClient::new(config.backend_url.clone());
     let (events, _) = broadcast::channel(1024);
@@ -117,6 +205,8 @@ pub fn build_state(config: Config) -> Arc<AppState> {
         store,
         backend,
         events,
+        assets: Arc::new(Mutex::new(HashMap::new())),
+        rtc_sessions: Arc::new(Mutex::new(HashMap::new())),
         channel_limits: Arc::new(Mutex::new(HashMap::new())),
         global_limits: Arc::new(Mutex::new(HashMap::new())),
         channel_registry: Arc::new(Mutex::new(HashMap::new())),
@@ -127,10 +217,29 @@ pub fn build_state(config: Config) -> Arc<AppState> {
 pub fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/media/assets", post(upload_media))
+        .route(
+            "/media/assets/:asset_id",
+            get(get_asset_metadata).delete(delete_asset),
+        )
+        .route("/media/assets/:asset_id/content", get(get_asset_content))
+        .route("/rtc/sessions", post(create_rtc_session))
+        .route("/rtc/sessions/:session_id/signals", post(post_rtc_signal))
         .route("/optimistic/metrics", get(metrics))
         .route("/optimistic/ws", get(ws_upgrade))
         .route("/optimistic/events", get(sse_events))
         .route("/internal/backend/events", post(backend_events_ingest))
+        .route(
+            "/internal/assets/:asset_id",
+            get(get_internal_asset_metadata),
+        )
+        .route(
+            "/internal/assets/:asset_id/content",
+            get(get_internal_asset_content),
+        )
+        .layer(DefaultBodyLimit::max(
+            state.config.media_max_upload_bytes as usize,
+        ))
         .with_state(state)
 }
 
@@ -183,6 +292,320 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Json<Value> {
     }))
 }
 
+type ApiError = (StatusCode, Json<Value>);
+type ApiResult<T> = Result<T, ApiError>;
+
+async fn upload_media(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> ApiResult<impl IntoResponse> {
+    purge_expired_runtime_state(&state);
+    let actor = resolve_actor_from_headers(&headers, &state.config, true)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    let site = request_site(&headers);
+
+    let mut selected: Option<(String, Option<String>, Vec<u8>)> = None;
+    while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
+        let mime = field
+            .content_type()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let file_name = field.file_name().map(|value| value.to_string());
+        let bytes = field.bytes().await.map_err(multipart_error)?;
+        if bytes.is_empty() {
+            continue;
+        }
+        selected = Some((mime, file_name, bytes.to_vec()));
+        break;
+    }
+
+    let Some((mime_type, file_name, bytes)) = selected else {
+        return Err(api_error(StatusCode::BAD_REQUEST, "MISSING_MEDIA"));
+    };
+
+    let media_type = media_type_from_mime(&mime_type)
+        .ok_or_else(|| api_error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "UNSUPPORTED_MEDIA_TYPE"))?;
+    if bytes.len() as u64 > state.config.media_max_upload_bytes {
+        return Err(api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "PAYLOAD_TOO_LARGE",
+        ));
+    }
+
+    let asset_id = Uuid::new_v4().to_string();
+    let path = state
+        .config
+        .media_storage_root
+        .join(format!("{}.bin", &asset_id));
+    fs::write(&path, &bytes)
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "ASSET_WRITE_FAILED"))?;
+
+    let now = now_secs();
+    let record = AssetRecord {
+        asset_id: asset_id.clone(),
+        site: site.clone(),
+        owner_key: actor.actor_key.clone(),
+        media_type: media_type.to_string(),
+        mime_type,
+        file_name,
+        size_bytes: bytes.len() as u64,
+        path,
+        created_at_secs: now,
+        expires_at_secs: now + state.config.media_ttl_secs,
+    };
+    let metadata = asset_metadata(&record);
+    state
+        .assets
+        .lock()
+        .expect("assets lock")
+        .insert(asset_id.clone(), record);
+
+    emit_server_event(
+        &state,
+        "MEDIA_ASSET_CREATED",
+        json!({"assetId": asset_id, "site": site, "mediaType": media_type}),
+    );
+
+    let mut response_headers = HeaderMap::new();
+    if let Some(cookie) = actor.set_cookie {
+        if let Ok(value) = HeaderValue::from_str(&cookie) {
+            response_headers.insert(SET_COOKIE, value);
+        }
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        response_headers,
+        Json(json!({ "status": "ok", "asset": metadata })),
+    ))
+}
+
+async fn get_asset_metadata(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    purge_expired_runtime_state(&state);
+    let actor = resolve_actor_from_headers(&headers, &state.config, false)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    let site = request_site(&headers);
+    let record = owned_asset(&state, &asset_id, &site, &actor.actor_key)?;
+    Ok(Json(
+        json!({ "status": "ok", "asset": asset_metadata(&record) }),
+    ))
+}
+
+async fn get_asset_content(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    purge_expired_runtime_state(&state);
+    let actor = resolve_actor_from_headers(&headers, &state.config, false)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    let site = request_site(&headers);
+    let record = owned_asset(&state, &asset_id, &site, &actor.actor_key)?;
+    let bytes = fs::read(&record.path)
+        .map_err(|_| api_error(StatusCode::NOT_FOUND, "ASSET_CONTENT_MISSING"))?;
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_str(&record.mime_type)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    response_headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&bytes.len().to_string())
+            .unwrap_or_else(|_| HeaderValue::from_static("0")),
+    );
+    Ok((StatusCode::OK, response_headers, bytes))
+}
+
+async fn delete_asset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    purge_expired_runtime_state(&state);
+    let actor = resolve_actor_from_headers(&headers, &state.config, false)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    let site = request_site(&headers);
+    let record = owned_asset(&state, &asset_id, &site, &actor.actor_key)?;
+    {
+        let mut assets = state.assets.lock().expect("assets lock");
+        assets.remove(&record.asset_id);
+    }
+    let _ = fs::remove_file(&record.path);
+    emit_server_event(
+        &state,
+        "MEDIA_ASSET_DELETED",
+        json!({"assetId": asset_id, "site": site}),
+    );
+    Ok(Json(json!({ "status": "ok", "deleted": true })))
+}
+
+async fn get_internal_asset_metadata(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    purge_expired_runtime_state(&state);
+    ensure_backend_token(&headers, &state.config)?;
+    let record = internal_asset(&state, &asset_id)?;
+    Ok(Json(
+        json!({ "status": "ok", "asset": asset_metadata(&record) }),
+    ))
+}
+
+async fn get_internal_asset_content(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    purge_expired_runtime_state(&state);
+    ensure_backend_token(&headers, &state.config)?;
+    let record = internal_asset(&state, &asset_id)?;
+    let bytes = fs::read(&record.path)
+        .map_err(|_| api_error(StatusCode::NOT_FOUND, "ASSET_CONTENT_MISSING"))?;
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_str(&record.mime_type)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    response_headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&bytes.len().to_string())
+            .unwrap_or_else(|_| HeaderValue::from_static("0")),
+    );
+    Ok((StatusCode::OK, response_headers, bytes))
+}
+
+async fn create_rtc_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CreateRtcSessionRequest>,
+) -> ApiResult<impl IntoResponse> {
+    purge_expired_runtime_state(&state);
+    let actor = resolve_actor_from_headers(&headers, &state.config, true)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    let site = request_site(&headers);
+    let session_id = Uuid::new_v4().to_string();
+    let mut participants = vec![actor.actor_key.clone()];
+    for participant in body.participants.unwrap_or_default() {
+        if !participants.iter().any(|value| value == &participant) {
+            participants.push(participant);
+        }
+    }
+    let now = now_secs();
+    let ttl = body.ttl_secs.unwrap_or(state.config.media_ttl_secs);
+    let record = RtcSessionRecord {
+        session_id: session_id.clone(),
+        site: site.clone(),
+        owner_key: actor.actor_key.clone(),
+        participants,
+        signals: Vec::new(),
+        next_seq: 0,
+        expires_at_secs: now + ttl,
+    };
+    state
+        .rtc_sessions
+        .lock()
+        .expect("rtc sessions lock")
+        .insert(session_id.clone(), record);
+    let mut response_headers = HeaderMap::new();
+    if let Some(cookie) = actor.set_cookie {
+        if let Ok(value) = HeaderValue::from_str(&cookie) {
+            response_headers.insert(SET_COOKIE, value);
+        }
+    }
+    Ok((
+        StatusCode::CREATED,
+        response_headers,
+        Json(json!({
+            "status": "ok",
+            "session": {
+                "sessionId": session_id.clone(),
+                "channel": rtc_channel_name(&session_id),
+                "site": site,
+                "owner": actor.actor_id,
+                "createdAt": now,
+                "expiresAt": now + ttl,
+            }
+        })),
+    ))
+}
+
+async fn post_rtc_signal(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(body): Json<PostRtcSignalRequest>,
+) -> ApiResult<Json<Value>> {
+    purge_expired_runtime_state(&state);
+    let actor = resolve_actor_from_headers(&headers, &state.config, false)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    let site = request_site(&headers);
+    let channel = rtc_channel_name(&session_id);
+
+    let signal = {
+        let mut sessions = state.rtc_sessions.lock().expect("rtc sessions lock");
+        let Some(session) = sessions.get_mut(&session_id) else {
+            return Err(api_error(StatusCode::NOT_FOUND, "RTC_SESSION_NOT_FOUND"));
+        };
+        if session.site != site {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "RTC_SESSION_SITE_MISMATCH",
+            ));
+        }
+        if session.owner_key != actor.actor_key
+            && !session
+                .participants
+                .iter()
+                .any(|participant| participant == &actor.actor_key)
+        {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "RTC_SESSION_ACCESS_DENIED",
+            ));
+        }
+        session.next_seq += 1;
+        let signal = RtcSignalRecord {
+            seq: session.next_seq,
+            kind: body.kind.clone(),
+            sender_id: body.sender_id.clone(),
+            target_id: body.target_id.clone(),
+            payload: body.payload.clone(),
+            created_at_ms: now_millis(),
+        };
+        session.signals.push(signal.clone());
+        if session.signals.len() > 64 {
+            let overflow = session.signals.len() - 64;
+            session.signals.drain(0..overflow);
+        }
+        signal
+    };
+
+    broadcast_app_event(
+        &state,
+        json!({
+            "type": "invalidate",
+            "reason": "rtc-signal",
+            "site": site,
+            "cursor": signal.seq,
+            "intents": [rtc_signal_event_intent(&session_id, &signal, &channel)],
+        }),
+    );
+
+    Ok(Json(json!({
+        "status": "ok",
+        "sessionId": session_id,
+        "seq": signal.seq,
+    })))
+}
+
 async fn backend_events_ingest(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -194,7 +617,10 @@ async fn backend_events_ingest(
             .and_then(|h| h.to_str().ok())
             .unwrap_or_default();
         if token != state.config.backend_internal_token {
-            return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "UNAUTHORIZED_BACKEND_EVENT_SOURCE" })));
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "UNAUTHORIZED_BACKEND_EVENT_SOURCE" })),
+            );
         }
     }
 
@@ -223,26 +649,21 @@ async fn ws_upgrade(
     ws.on_upgrade(move |socket| ws_session(socket, query, headers, state))
 }
 
-async fn ws_session(
-    socket: WebSocket,
-    query: WsQuery,
-    headers: HeaderMap,
-    state: Arc<AppState>,
-) {
+async fn ws_session(socket: WebSocket, query: WsQuery, headers: HeaderMap, state: Arc<AppState>) {
     state.metrics.ws_total.fetch_add(1, Ordering::Relaxed);
     state.metrics.ws_active.fetch_add(1, Ordering::Relaxed);
 
     let transport_role = query.role.unwrap_or_else(|| "follower".to_string());
     let site = query.site.unwrap_or_else(|| "default".to_string());
     let connection_id = Uuid::new_v4().to_string();
-    let user = resolve_user_from_headers(&headers, &state.config);
+    let actor = resolve_actor_from_headers(&headers, &state.config, false);
     let ip = connection_ip_from_headers(&headers);
     let user_agent = headers
         .get("user-agent")
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string());
-    let user_id = user.as_ref().map(|resolved| resolved.id.clone());
-    let auth_role = user
+    let user_id = actor.as_ref().and_then(|resolved| resolved.user_id.clone());
+    let auth_role = actor
         .as_ref()
         .map(|resolved| resolved.role.clone())
         .unwrap_or_else(|| "guest".to_string());
@@ -251,6 +672,7 @@ async fn ws_session(
         auth_role: auth_role.clone(),
         site: site.clone(),
         connection_id: connection_id.clone(),
+        actor_key: actor.as_ref().map(|value| value.actor_key.clone()),
         user_id,
         ip,
         user_agent,
@@ -293,7 +715,9 @@ async fn ws_session(
     let replay = state.store.entries_after(cursor, 500);
     let replay_cursor = replay.last().map(|entry| entry.log_seq).unwrap_or(cursor);
     let _ = sender
-        .send(Message::Text(json!({ "type": "replay", "intents": replay, "cursor": replay_cursor }).to_string()))
+        .send(Message::Text(
+            json!({ "type": "replay", "intents": replay, "cursor": replay_cursor }).to_string(),
+        ))
         .await;
 
     loop {
@@ -400,15 +824,23 @@ async fn handle_intent_batch(
 ) {
     if context.transport_role != "leader" {
         let _ = sender
-            .send(Message::Text(json!({ "type": "error", "code": "NOT_LEADER" }).to_string()))
+            .send(Message::Text(
+                json!({ "type": "error", "code": "NOT_LEADER" }).to_string(),
+            ))
             .await;
         return;
     }
     if state.config.require_auth_for_writes && context.user_id.is_none() {
         let _ = sender
-            .send(Message::Text(json!({ "type": "error", "code": "UNAUTHORIZED" }).to_string()))
+            .send(Message::Text(
+                json!({ "type": "error", "code": "UNAUTHORIZED" }).to_string(),
+            ))
             .await;
-        emit_server_event(state, "INTENT_REJECTED", json!({"reason":"UNAUTHORIZED", "site": context.site}));
+        emit_server_event(
+            state,
+            "INTENT_REJECTED",
+            json!({"reason":"UNAUTHORIZED", "site": context.site}),
+        );
         return;
     }
 
@@ -445,7 +877,11 @@ async fn handle_intent_batch(
 
     let outcome = state.store.append_batch(records);
     for row in &outcome.all {
-        emit_server_event(state, "INTENT_ACCEPTED", json!({"id": row.id, "site": row.site, "logSeq": row.log_seq}));
+        emit_server_event(
+            state,
+            "INTENT_ACCEPTED",
+            json!({"id": row.id, "site": row.site, "logSeq": row.log_seq}),
+        );
     }
 
     let mut status_by_id = HashMap::<String, String>::new();
@@ -457,7 +893,11 @@ async fn handle_intent_batch(
     }
 
     if !outcome.fresh.is_empty() {
-        emit_server_event(state, "INTENT_FORWARDED", json!({"site": context.site, "count": outcome.fresh.len()}));
+        emit_server_event(
+            state,
+            "INTENT_FORWARDED",
+            json!({"site": context.site, "count": outcome.fresh.len()}),
+        );
         let backend_ctx = BackendContext {
             site: context.site.clone(),
             connection_id: Some(context.connection_id.clone()),
@@ -483,14 +923,25 @@ async fn handle_intent_batch(
             })
             .collect::<Vec<_>>();
 
-        match state.backend.apply_intents(fresh_payload, &backend_ctx).await {
+        match state
+            .backend
+            .apply_intents(fresh_payload, &backend_ctx)
+            .await
+        {
             Ok(result) => {
                 if let Some(results) = result.get("results").and_then(|v| v.as_array()) {
                     for row in results {
-                        let Some(id) = row.get("id").and_then(|v| v.as_str()) else { continue };
+                        let Some(id) = row.get("id").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
                         let status = normalize_status(row.get("status").and_then(|v| v.as_str()));
                         status_by_id.insert(id.to_string(), status.to_string());
-                        state.store.update_status(id, &context.site, status, row.get("code").cloned());
+                        state.store.update_status(
+                            id,
+                            &context.site,
+                            status,
+                            row.get("code").cloned(),
+                        );
                         if let Some(events) = row.get("events").and_then(|v| v.as_array()) {
                             for event in events {
                                 publish_backend_event(state, event);
@@ -540,13 +991,20 @@ async fn handle_intent_batch(
         .collect::<Vec<_>>();
 
     let _ = sender
-        .send(Message::Text(json!({ "type": "ack", "intents": ack_intents }).to_string()))
+        .send(Message::Text(
+            json!({ "type": "ack", "intents": ack_intents }).to_string(),
+        ))
         .await;
 
     let invalidate_intents = outcome
         .all
         .iter()
-        .filter(|entry| status_by_id.get(&entry.id).map(|s| s == "acked").unwrap_or(true))
+        .filter(|entry| {
+            status_by_id
+                .get(&entry.id)
+                .map(|s| s == "acked")
+                .unwrap_or(true)
+        })
         .map(|entry| {
             json!({
                 "id": entry.id,
@@ -560,13 +1018,16 @@ async fn handle_intent_batch(
         .collect::<Vec<_>>();
 
     if !invalidate_intents.is_empty() {
-        broadcast_app_event(state, json!({
-            "type": "invalidate",
-            "reason": "intent-flush",
-            "site": context.site,
-            "cursor": state.store.latest_cursor(),
-            "intents": invalidate_intents,
-        }));
+        broadcast_app_event(
+            state,
+            json!({
+                "type": "invalidate",
+                "reason": "intent-flush",
+                "site": context.site,
+                "cursor": state.store.latest_cursor(),
+                "intents": invalidate_intents,
+            }),
+        );
     }
 }
 
@@ -576,7 +1037,10 @@ async fn handle_channel_subscribe(
     context: &ConnectionContext,
     payload: Value,
 ) {
-    let channel = payload.get("channel").and_then(|v| v.as_str()).unwrap_or("global");
+    let channel = payload
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("global");
     let params = payload.get("params").cloned().unwrap_or_else(|| json!({}));
 
     if !can_access_channel(state, channel, context) {
@@ -606,7 +1070,10 @@ async fn handle_channel_subscribe(
         state.config.channel_subscribe_window_ms,
     );
     if !rate_allowed {
-        state.metrics.rate_limit_hits.fetch_add(1, Ordering::Relaxed);
+        state
+            .metrics
+            .rate_limit_hits
+            .fetch_add(1, Ordering::Relaxed);
         let _ = sender
             .send(Message::Text(
                 json!({
@@ -636,51 +1103,55 @@ async fn handle_channel_subscribe(
         json!({"channel": channel, "site": context.site, "connectionId": context.connection_id}),
     );
 
-        let _ = sender
+    let _ = sender
             .send(Message::Text(
                 json!({ "type": "channel.ack", "status": "ok", "channel": channel, "params": params.clone() }).to_string(),
             ))
             .await;
 
     let mut snapshot_cursor = state.store.latest_cursor();
-    let intents = if state.backend.is_configured() {
-        let backend_ctx = BackendContext {
-            site: context.site.clone(),
-            connection_id: Some(context.connection_id.clone()),
-            ip: Some(context.ip.clone()),
-            user_agent: context.user_agent.clone(),
-            user: Some(BackendUser {
-                id: context.user_id.clone(),
-                role: context.auth_role.clone(),
-            }),
-        };
-        match state
-            .backend
-            .subscribe(channel, params.clone(), &backend_ctx)
-            .await
-        {
-            Ok(response) if response.get("status").and_then(|v| v.as_str()) == Some("ok") => {
-                snapshot_cursor = response
-                    .get("cursor")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(snapshot_cursor);
-                response
-                    .get("snapshot")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default()
+    let intents =
+        if let Some((rtc_intents, rtc_cursor)) = rtc_snapshot_for_channel(state, channel, 0) {
+            snapshot_cursor = rtc_cursor;
+            rtc_intents
+        } else if state.backend.is_configured() {
+            let backend_ctx = BackendContext {
+                site: context.site.clone(),
+                connection_id: Some(context.connection_id.clone()),
+                ip: Some(context.ip.clone()),
+                user_agent: context.user_agent.clone(),
+                user: Some(BackendUser {
+                    id: context.user_id.clone(),
+                    role: context.auth_role.clone(),
+                }),
+            };
+            match state
+                .backend
+                .subscribe(channel, params.clone(), &backend_ctx)
+                .await
+            {
+                Ok(response) if response.get("status").and_then(|v| v.as_str()) == Some("ok") => {
+                    snapshot_cursor = response
+                        .get("cursor")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(snapshot_cursor);
+                    response
+                        .get("snapshot")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                }
+                _ => store_entries_for_channel_after(state, channel, 0, 200)
+                    .into_iter()
+                    .map(|entry| serde_json::to_value(entry).unwrap_or(Value::Null))
+                    .collect(),
             }
-            _ => store_entries_for_channel_after(state, channel, 0, 200)
+        } else {
+            store_entries_for_channel_after(state, channel, 0, 200)
                 .into_iter()
                 .map(|entry| serde_json::to_value(entry).unwrap_or(Value::Null))
-                .collect(),
-        }
-    } else {
-        store_entries_for_channel_after(state, channel, 0, 200)
-            .into_iter()
-            .map(|entry| serde_json::to_value(entry).unwrap_or(Value::Null))
-            .collect()
-    };
+                .collect()
+        };
 
     let _ = sender
         .send(Message::Text(
@@ -702,13 +1173,17 @@ async fn handle_channel_unsubscribe(
     context: &ConnectionContext,
     payload: Value,
 ) {
-    let channel = payload.get("channel").and_then(|v| v.as_str()).unwrap_or("global");
+    let channel = payload
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("global");
     let params = payload.get("params").cloned().unwrap_or_else(|| json!({}));
     unregister_channel_subscription(state, &context.connection_id, channel, &params);
 
     let _ = sender
         .send(Message::Text(
-            json!({ "type": "channel.unsubscribed", "status": "ok", "channel": channel }).to_string(),
+            json!({ "type": "channel.unsubscribed", "status": "ok", "channel": channel })
+                .to_string(),
         ))
         .await;
     let _ = sender
@@ -724,7 +1199,10 @@ async fn handle_channel_resync(
     context: &ConnectionContext,
     payload: Value,
 ) {
-    let channel = payload.get("channel").and_then(|v| v.as_str()).unwrap_or("global");
+    let channel = payload
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("global");
     let params = payload.get("params").cloned().unwrap_or_else(|| json!({}));
     if !can_access_channel(state, channel, context) {
         emit_server_event(
@@ -740,8 +1218,20 @@ async fn handle_channel_resync(
         return;
     }
     let cursor = payload.get("cursor").and_then(|v| v.as_u64()).unwrap_or(0);
-    let intents = store_entries_for_channel_after(state, channel, cursor, 200);
-    let next = intents.last().map(|entry| entry.log_seq).unwrap_or(cursor);
+    let (intents, next) =
+        if let Some((rtc_intents, rtc_cursor)) = rtc_snapshot_for_channel(state, channel, cursor) {
+            (rtc_intents, rtc_cursor)
+        } else {
+            let intents = store_entries_for_channel_after(state, channel, cursor, 200);
+            let next = intents.last().map(|entry| entry.log_seq).unwrap_or(cursor);
+            (
+                intents
+                    .into_iter()
+                    .map(|entry| serde_json::to_value(entry).unwrap_or(Value::Null))
+                    .collect::<Vec<_>>(),
+                next,
+            )
+        };
     let _ = sender
         .send(Message::Text(
             json!({ "type": "channel.replay", "status": "ok", "channel": channel, "params": params, "cursor": next, "intents": intents }).to_string(),
@@ -755,7 +1245,10 @@ async fn handle_channel_command(
     context: &ConnectionContext,
     payload: Value,
 ) {
-    let channel = payload.get("channel").and_then(|v| v.as_str()).unwrap_or("global");
+    let channel = payload
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("global");
     let params = payload.get("params").cloned().unwrap_or_else(|| json!({}));
     if !can_access_channel(state, channel, context) {
         emit_server_event(
@@ -770,7 +1263,10 @@ async fn handle_channel_command(
             .await;
         return;
     }
-    let command = payload.get("command").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let command = payload
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
     let _ = sender
         .send(Message::Text(
             json!({ "type": "channel.command", "status": "ok", "channel": channel, "params": params, "command": command }).to_string(),
@@ -792,7 +1288,10 @@ async fn sse_events(
         .map(|resolved| resolved.role.clone())
         .unwrap_or_else(|| "guest".to_string());
     let replay = state.store.entries_after(replay_cursor, 500);
-    let replay_cursor = replay.last().map(|entry| entry.log_seq).unwrap_or(replay_cursor);
+    let replay_cursor = replay
+        .last()
+        .map(|entry| entry.log_seq)
+        .unwrap_or(replay_cursor);
 
     state.metrics.sse_total.fetch_add(1, Ordering::Relaxed);
     state.metrics.sse_active.fetch_add(1, Ordering::Relaxed);
@@ -834,45 +1333,67 @@ async fn sse_events(
         state_for_stream.metrics.sse_active.fetch_sub(1, Ordering::Relaxed);
     };
 
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(20)).text("keepalive"))
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(20))
+            .text("keepalive"),
+    )
 }
 
 fn publish_backend_event(state: &Arc<AppState>, event: &Value) {
-    let reason = event.get("reason").and_then(|v| v.as_str()).unwrap_or("backend-event");
-    let site = event.get("site").and_then(|v| v.as_str()).unwrap_or("default");
+    let reason = event
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("backend-event");
+    let site = event
+        .get("site")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default");
     if let Some(island_id) = event.get("islandId").and_then(|v| v.as_str()) {
-        broadcast_app_event(state, json!({
-            "type": "island.invalidate",
-            "reason": reason,
-            "site": site,
-            "islandId": island_id,
-            "parameters": event.get("parameters").cloned().unwrap_or_else(|| json!({})),
-            "timestamp": event.get("timestamp").cloned().unwrap_or_else(|| json!(now_millis())),
-            "cursor": event.get("cursor").cloned().unwrap_or_else(|| json!(state.store.latest_cursor())),
-            "dataContract": event.get("dataContract").cloned().unwrap_or(Value::Null),
-            "payload": event.get("payload").cloned().unwrap_or_else(|| json!({})),
-        }));
+        broadcast_app_event(
+            state,
+            json!({
+                "type": "island.invalidate",
+                "reason": reason,
+                "site": site,
+                "islandId": island_id,
+                "parameters": event.get("parameters").cloned().unwrap_or_else(|| json!({})),
+                "timestamp": event.get("timestamp").cloned().unwrap_or_else(|| json!(now_millis())),
+                "cursor": event.get("cursor").cloned().unwrap_or_else(|| json!(state.store.latest_cursor())),
+                "dataContract": event.get("dataContract").cloned().unwrap_or(Value::Null),
+                "payload": event.get("payload").cloned().unwrap_or_else(|| json!({})),
+            }),
+        );
     }
 
     if let Some(intents) = event.get("intents").and_then(|v| v.as_array()) {
-        broadcast_app_event(state, json!({
-            "type": "invalidate",
-            "reason": reason,
-            "site": site,
-            "cursor": event.get("cursor").cloned().unwrap_or_else(|| json!(state.store.latest_cursor())),
-            "intents": intents,
-        }));
+        broadcast_app_event(
+            state,
+            json!({
+                "type": "invalidate",
+                "reason": reason,
+                "site": site,
+                "cursor": event.get("cursor").cloned().unwrap_or_else(|| json!(state.store.latest_cursor())),
+                "intents": intents,
+            }),
+        );
     }
 }
 
 fn broadcast_app_event(state: &Arc<AppState>, event: Value) {
-    state.metrics.broadcast_count.fetch_add(1, Ordering::Relaxed);
+    state
+        .metrics
+        .broadcast_count
+        .fetch_add(1, Ordering::Relaxed);
     let _ = state.events.send(event);
 }
 
 fn teardown_connection_state(state: &Arc<AppState>, connection_id: &str) {
     state.metrics.ws_active.fetch_sub(1, Ordering::Relaxed);
-    let mut registry = state.channel_registry.lock().expect("channel registry lock");
+    let mut registry = state
+        .channel_registry
+        .lock()
+        .expect("channel registry lock");
     registry.remove(connection_id);
 }
 
@@ -883,7 +1404,10 @@ fn register_channel_subscription(
     channel: &str,
     params: Value,
 ) {
-    let mut registry = state.channel_registry.lock().expect("channel registry lock");
+    let mut registry = state
+        .channel_registry
+        .lock()
+        .expect("channel registry lock");
     let row = registry.entry(connection_id.to_string()).or_default();
     row.site = site.to_string();
     let subscription_key = subscription_key(channel, &params);
@@ -896,8 +1420,16 @@ fn register_channel_subscription(
     );
 }
 
-fn unregister_channel_subscription(state: &Arc<AppState>, connection_id: &str, channel: &str, params: &Value) {
-    let mut registry = state.channel_registry.lock().expect("channel registry lock");
+fn unregister_channel_subscription(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    channel: &str,
+    params: &Value,
+) {
+    let mut registry = state
+        .channel_registry
+        .lock()
+        .expect("channel registry lock");
     if let Some(row) = registry.get_mut(connection_id) {
         row.subscriptions.remove(&subscription_key(channel, params));
         if row.subscriptions.is_empty() {
@@ -906,13 +1438,23 @@ fn unregister_channel_subscription(state: &Arc<AppState>, connection_id: &str, c
     }
 }
 
-fn build_frames_for_connection(state: &Arc<AppState>, context: &ConnectionContext, event: &Value) -> Vec<Value> {
-    let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("message");
+fn build_frames_for_connection(
+    state: &Arc<AppState>,
+    context: &ConnectionContext,
+    event: &Value,
+) -> Vec<Value> {
+    let event_type = event
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("message");
     if event_type == "island.invalidate" {
         if is_island_authorized(state, &context.auth_role, None, event) {
             return vec![event.clone()];
         }
-        state.metrics.ws_unauthorized_filtered.fetch_add(1, Ordering::Relaxed);
+        state
+            .metrics
+            .ws_unauthorized_filtered
+            .fetch_add(1, Ordering::Relaxed);
         return Vec::new();
     }
 
@@ -921,14 +1463,20 @@ fn build_frames_for_connection(state: &Arc<AppState>, context: &ConnectionContex
     }
 
     let row = {
-        let registry = state.channel_registry.lock().expect("channel registry lock");
+        let registry = state
+            .channel_registry
+            .lock()
+            .expect("channel registry lock");
         match registry.get(&context.connection_id) {
             Some(row) => row.clone(),
             None => return Vec::new(),
         }
     };
 
-    let event_site = event.get("site").and_then(|v| v.as_str()).unwrap_or("default");
+    let event_site = event
+        .get("site")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default");
     if event_site != row.site {
         return Vec::new();
     }
@@ -939,7 +1487,10 @@ fn build_frames_for_connection(state: &Arc<AppState>, context: &ConnectionContex
     }
 
     let intents = event.get("intents").cloned().unwrap_or_else(|| json!([]));
-    let reason = event.get("reason").cloned().unwrap_or_else(|| json!("backend-event"));
+    let reason = event
+        .get("reason")
+        .cloned()
+        .unwrap_or_else(|| json!("backend-event"));
     let cursor = event
         .get("cursor")
         .cloned()
@@ -948,7 +1499,11 @@ fn build_frames_for_connection(state: &Arc<AppState>, context: &ConnectionContex
 
     row.subscriptions
         .values()
-        .filter(|subscription| event_channels.iter().any(|channel_id| channel_id == &subscription.channel))
+        .filter(|subscription| {
+            event_channels
+                .iter()
+                .any(|channel_id| channel_id == &subscription.channel)
+        })
         .map(|subscription| {
             json!({
                 "type": "channel.invalidate",
@@ -1020,6 +1575,207 @@ fn extract_event_channels(event: &Value) -> Vec<String> {
     vec!["global".to_string()]
 }
 
+fn api_error(status: StatusCode, code: &str) -> ApiError {
+    (status, Json(json!({ "error": code })))
+}
+
+fn multipart_error(error: axum::extract::multipart::MultipartError) -> ApiError {
+    let message = error.to_string().to_lowercase();
+    if message.contains("length limit") || message.contains("body too large") {
+        api_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE")
+    } else {
+        api_error(StatusCode::BAD_REQUEST, "INVALID_MULTIPART")
+    }
+}
+
+fn request_site(headers: &HeaderMap) -> String {
+    headers
+        .get("x-ssma-site")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn media_type_from_mime(mime: &str) -> Option<&'static str> {
+    if mime.starts_with("image/") {
+        Some("image")
+    } else if mime.starts_with("audio/") {
+        Some("audio")
+    } else {
+        None
+    }
+}
+
+fn asset_metadata(record: &AssetRecord) -> AssetMetadata {
+    AssetMetadata {
+        asset_id: record.asset_id.clone(),
+        site: record.site.clone(),
+        media_type: record.media_type.clone(),
+        mime_type: record.mime_type.clone(),
+        file_name: record.file_name.clone(),
+        size_bytes: record.size_bytes,
+        created_at: record.created_at_secs,
+        expires_at: record.expires_at_secs,
+    }
+}
+
+fn internal_asset(state: &Arc<AppState>, asset_id: &str) -> ApiResult<AssetRecord> {
+    let assets = state.assets.lock().expect("assets lock");
+    assets
+        .get(asset_id)
+        .cloned()
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "ASSET_NOT_FOUND"))
+}
+
+fn owned_asset(
+    state: &Arc<AppState>,
+    asset_id: &str,
+    site: &str,
+    actor_key: &str,
+) -> ApiResult<AssetRecord> {
+    let assets = state.assets.lock().expect("assets lock");
+    let Some(record) = assets.get(asset_id).cloned() else {
+        return Err(api_error(StatusCode::NOT_FOUND, "ASSET_NOT_FOUND"));
+    };
+    if record.site != site {
+        return Err(api_error(StatusCode::FORBIDDEN, "ASSET_SITE_MISMATCH"));
+    }
+    if record.owner_key != actor_key {
+        return Err(api_error(StatusCode::FORBIDDEN, "ASSET_ACCESS_DENIED"));
+    }
+    Ok(record)
+}
+
+fn ensure_backend_token(headers: &HeaderMap, config: &Config) -> ApiResult<()> {
+    if config.backend_internal_token.is_empty() {
+        return Ok(());
+    }
+    let token = headers
+        .get("x-ssma-backend-token")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if token == config.backend_internal_token {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED_BACKEND_REQUEST",
+        ))
+    }
+}
+
+fn resolve_actor_from_headers(
+    headers: &HeaderMap,
+    config: &Config,
+    issue_if_missing: bool,
+) -> Option<ActorIdentity> {
+    if let Some(user) = resolve_user_from_headers(headers, config) {
+        return Some(ActorIdentity {
+            actor_key: format!("user:{}", user.id),
+            actor_id: user.id.clone(),
+            role: user.role.clone(),
+            user_id: Some(user.id),
+            set_cookie: None,
+        });
+    }
+
+    if let Some(anon) = cookie_value(headers, &config.anonymous_cookie_name) {
+        return Some(ActorIdentity {
+            actor_key: format!("anon:{}", anon),
+            actor_id: anon,
+            role: "guest".to_string(),
+            user_id: None,
+            set_cookie: None,
+        });
+    }
+
+    if !issue_if_missing {
+        return None;
+    }
+
+    let anon = Uuid::new_v4().to_string();
+    Some(ActorIdentity {
+        actor_key: format!("anon:{}", anon),
+        actor_id: anon.clone(),
+        role: "guest".to_string(),
+        user_id: None,
+        set_cookie: Some(format!(
+            "{}={}; Path=/; HttpOnly; SameSite=Lax",
+            config.anonymous_cookie_name, anon
+        )),
+    })
+}
+
+fn purge_expired_runtime_state(state: &Arc<AppState>) {
+    let now = now_secs();
+    {
+        let mut assets = state.assets.lock().expect("assets lock");
+        let mut expired = Vec::new();
+        for (asset_id, record) in assets.iter() {
+            if record.expires_at_secs <= now {
+                expired.push((asset_id.clone(), record.path.clone()));
+            }
+        }
+        for (asset_id, path) in expired {
+            assets.remove(&asset_id);
+            let _ = fs::remove_file(path);
+        }
+    }
+    {
+        let mut sessions = state.rtc_sessions.lock().expect("rtc sessions lock");
+        sessions.retain(|_, session| session.expires_at_secs > now);
+    }
+}
+
+fn rtc_channel_name(session_id: &str) -> String {
+    format!("rtc.session.{}", session_id)
+}
+
+fn rtc_signal_event_intent(session_id: &str, signal: &RtcSignalRecord, channel: &str) -> Value {
+    json!({
+        "id": format!("rtc:{}:{}", session_id, signal.seq),
+        "intent": "RTC_SIGNAL",
+        "payload": {
+            "sessionId": session_id,
+            "kind": signal.kind,
+            "senderId": signal.sender_id,
+            "targetId": signal.target_id,
+            "payload": signal.payload,
+            "createdAt": signal.created_at_ms,
+            "seq": signal.seq,
+        },
+        "meta": {
+            "channels": [channel],
+            "ephemeral": true,
+        },
+        "insertedAt": signal.created_at_ms,
+        "logSeq": signal.seq,
+    })
+}
+
+fn rtc_snapshot_for_channel(
+    state: &Arc<AppState>,
+    channel: &str,
+    cursor: u64,
+) -> Option<(Vec<Value>, u64)> {
+    let session_id = channel.strip_prefix("rtc.session.")?;
+    let sessions = state.rtc_sessions.lock().expect("rtc sessions lock");
+    let session = sessions.get(session_id)?;
+    let intents = session
+        .signals
+        .iter()
+        .filter(|signal| signal.seq > cursor)
+        .map(|signal| rtc_signal_event_intent(&session.session_id, signal, channel))
+        .collect::<Vec<_>>();
+    let next = session
+        .signals
+        .last()
+        .map(|signal| signal.seq)
+        .unwrap_or(cursor);
+    Some((intents, next))
+}
+
 fn resolve_user_from_headers(headers: &HeaderMap, config: &Config) -> Option<ResolvedUser> {
     let token = cookie_value(headers, &config.auth_cookie_name)?;
     let claims = decode::<AuthClaims>(
@@ -1081,6 +1837,12 @@ fn is_sse_event_authorized(
     requested_islands: Option<&Vec<String>>,
     event: &Value,
 ) -> bool {
+    if extract_event_channels(event)
+        .iter()
+        .any(|channel| channel.starts_with("rtc.session."))
+    {
+        return false;
+    }
     is_island_authorized(state, role, requested_islands, event)
 }
 
@@ -1168,12 +1930,7 @@ fn consume_channel_rate_limit(
     bucket.count <= max
 }
 
-fn consume_global_rate_limit(
-    state: &Arc<AppState>,
-    key: String,
-    max: u32,
-    window_ms: i64,
-) -> bool {
+fn consume_global_rate_limit(state: &Arc<AppState>, key: String, max: u32, window_ms: i64) -> bool {
     let now = now_millis();
     let mut buckets = state.global_limits.lock().expect("global limit lock");
     let bucket = buckets.entry(key).or_insert(RateBucket {
@@ -1189,6 +1946,21 @@ fn consume_global_rate_limit(
 }
 
 fn can_access_channel(state: &Arc<AppState>, channel: &str, context: &ConnectionContext) -> bool {
+    if let Some(session_id) = channel.strip_prefix("rtc.session.") {
+        let Some(actor_key) = &context.actor_key else {
+            return false;
+        };
+        let sessions = state.rtc_sessions.lock().expect("rtc sessions lock");
+        let Some(session) = sessions.get(session_id) else {
+            return false;
+        };
+        return session.site == context.site
+            && (session.owner_key == *actor_key
+                || session
+                    .participants
+                    .iter()
+                    .any(|participant| participant == actor_key));
+    }
     if !state
         .config
         .protected_channels
@@ -1213,7 +1985,11 @@ fn role_rank(role: &str) -> u8 {
 
 fn emit_server_event(state: &Arc<AppState>, event_name: &str, payload: Value) {
     {
-        let mut counters = state.metrics.server_events.lock().expect("server events lock");
+        let mut counters = state
+            .metrics
+            .server_events
+            .lock()
+            .expect("server events lock");
         let value = counters.entry(event_name.to_string()).or_insert(0);
         *value += 1;
     }

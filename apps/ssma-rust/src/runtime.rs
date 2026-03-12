@@ -12,10 +12,14 @@ pub struct Config {
     pub backend_url: String,
     pub backend_internal_token: String,
     pub auth_cookie_name: String,
+    pub anonymous_cookie_name: String,
     pub auth_jwt_secret: String,
     pub require_auth_for_writes: bool,
     pub replay_window_ms: u64,
     pub intent_store_path: PathBuf,
+    pub media_storage_root: PathBuf,
+    pub media_max_upload_bytes: u64,
+    pub media_ttl_secs: u64,
     pub global_rate_window_ms: i64,
     pub global_rate_max: u32,
     pub channel_subscribe_window_ms: i64,
@@ -37,10 +41,14 @@ impl Config {
             .and_then(|v| v.parse::<u16>().ok())
             .unwrap_or(5050);
         let backend_url = std::env::var("SSMA_BACKEND_URL").unwrap_or_default();
-        let backend_internal_token = std::env::var("SSMA_BACKEND_INTERNAL_TOKEN").unwrap_or_default();
-        let auth_cookie_name = std::env::var("SSMA_AUTH_COOKIE").unwrap_or_else(|_| "ssma_session".to_string());
-        let auth_jwt_secret =
-            std::env::var("SSMA_AUTH_JWT_SECRET").unwrap_or_else(|_| "change-me-in-production".to_string());
+        let backend_internal_token =
+            std::env::var("SSMA_BACKEND_INTERNAL_TOKEN").unwrap_or_default();
+        let auth_cookie_name =
+            std::env::var("SSMA_AUTH_COOKIE").unwrap_or_else(|_| "ssma_session".to_string());
+        let anonymous_cookie_name =
+            std::env::var("SSMA_ANON_COOKIE").unwrap_or_else(|_| "ssma_anon".to_string());
+        let auth_jwt_secret = std::env::var("SSMA_AUTH_JWT_SECRET")
+            .unwrap_or_else(|_| "change-me-in-production".to_string());
         let require_auth_for_writes = std::env::var("SSMA_OPTIMISTIC_REQUIRE_AUTH_WRITES")
             .map(|v| v == "true")
             .unwrap_or(false);
@@ -52,6 +60,17 @@ impl Config {
         let intent_store_path = std::env::var("SSMA_OPTIMISTIC_STORE")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./data/optimistic-intents-rust.json"));
+        let media_storage_root = std::env::var("SSMA_MEDIA_STORAGE_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("./data/media"));
+        let media_max_upload_bytes = std::env::var("SSMA_MEDIA_MAX_UPLOAD_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(50 * 1024 * 1024);
+        let media_ttl_secs = std::env::var("SSMA_MEDIA_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(60 * 60);
         let global_rate_window_ms = std::env::var("SSMA_RATE_WINDOW_MS")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
@@ -79,7 +98,8 @@ impl Config {
             })
             .unwrap_or_default();
         let protected_channel_min_role =
-            std::env::var("SSMA_OPTIMISTIC_PROTECTED_CHANNEL_MIN_ROLE").unwrap_or_else(|_| "admin".to_string());
+            std::env::var("SSMA_OPTIMISTIC_PROTECTED_CHANNEL_MIN_ROLE")
+                .unwrap_or_else(|_| "admin".to_string());
 
         Self {
             host,
@@ -88,10 +108,14 @@ impl Config {
             backend_url,
             backend_internal_token,
             auth_cookie_name,
+            anonymous_cookie_name,
             auth_jwt_secret,
             require_auth_for_writes,
             replay_window_ms,
             intent_store_path,
+            media_storage_root,
+            media_max_upload_bytes,
+            media_ttl_secs,
             global_rate_window_ms,
             global_rate_max,
             channel_subscribe_window_ms,
@@ -263,7 +287,9 @@ impl IntentStore {
     fn trim_replay_window_locked(&self, state: &mut PersistedStore) {
         let now = now_millis();
         let replay_start = now.saturating_sub(self.replay_window_ms as i64);
-        state.entries.retain(|entry| entry.inserted_at >= replay_start);
+        state
+            .entries
+            .retain(|entry| entry.inserted_at >= replay_start);
     }
 
     fn flush_locked(&self, state: &PersistedStore) -> std::io::Result<()> {
@@ -285,4 +311,11 @@ pub fn now_millis() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     now.as_millis() as i64
+}
+
+pub fn now_secs() -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    now.as_secs()
 }

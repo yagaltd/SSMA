@@ -12,3 +12,14 @@ Track parity against JS gateway runtime.
 - [x] Backend adapter (`applyIntents`, `query`, `subscribe`, `health`)
 - [x] E2E harness parity (scenarios A-F test suite added)
 - [x] Golden-vector conformance pass (runtime vector replay tests added)
+- [x] SSMA-owned media asset routes (`/media/*`)
+- [x] Backend-token-protected internal asset fetch (`/internal/assets/*`)
+- [x] Anonymous guest ownership for media assets (`SSMA_ANON_COOKIE`)
+- [x] RTC signaling routes (`/rtc/sessions`, `/rtc/sessions/:id/signals`)
+- [x] Durable vs ephemeral split validated in Rust E2E (RTC stays out of replay)
+
+Pending JS parity:
+- [ ] `/media/*` routes
+- [ ] `/internal/assets/*` adapter fetch routes
+- [ ] RTC signaling routes
+- [ ] Anonymous guest asset ownership parity

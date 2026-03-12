@@ -4,9 +4,11 @@ SSMA is a backend-agnostic realtime gateway implemented in both JavaScript and R
 
 It sits between frontend clients and your business backend, and owns:
 - WebSocket and SSE transport
+- media ingress and asset ownership
 - replay and invalidation fanout
 - auth and RBAC enforcement
 - optimistic intent persistence
+- RTC signaling/session coordination
 - backend adapter calls
 - protocol validation and conformance
 
@@ -18,6 +20,14 @@ It provides the gateway contract and runtime behavior around it.
 - `apps/ssma-js`: Node.js runtime
 - `apps/ssma-rust`: Rust runtime
 - `packages/ssma-protocol`: shared contracts and vectors
+
+Current parity state:
+- Rust is ahead for Session A gateway features:
+  - media asset routes
+  - backend-token-protected internal asset fetch
+  - anonymous guest asset ownership
+  - RTC signaling routes
+- JS still provides the baseline optimistic gateway/runtime and needs parity follow-up for the new media/RTC surface
 
 ## Core Contract
 
@@ -90,8 +100,33 @@ Recommended reading:
 - [`docs/guides/SSMA-IN-A-NUTSHELL.md`](docs/guides/SSMA-IN-A-NUTSHELL.md)
 - [`docs/guides/SSMA-RUNTIME.md`](docs/guides/SSMA-RUNTIME.md)
 - [`docs/guides/SSMA-OPTIMISTIC-SYNC.md`](docs/guides/SSMA-OPTIMISTIC-SYNC.md)
+- [`docs/api/http-endpoints.md`](docs/api/http-endpoints.md)
+- [`docs/roadmap/rust-parity-checklist.md`](docs/roadmap/rust-parity-checklist.md)
 - [`docs/api/streaming.md`](docs/api/streaming.md)
 - [`docs/operations/config.md`](docs/operations/config.md)
+
+## Session A Gateway Surface
+
+Rust runtime currently exposes these additional gateway routes:
+
+- `POST /media/assets`
+- `GET /media/assets/:assetId`
+- `GET /media/assets/:assetId/content`
+- `DELETE /media/assets/:assetId`
+- `POST /rtc/sessions`
+- `POST /rtc/sessions/:sessionId/signals`
+
+Backend adapters can fetch SSMA-owned assets through:
+
+- `GET /internal/assets/:assetId`
+- `GET /internal/assets/:assetId/content`
+
+Important behavior:
+
+- frontend media is uploaded to SSMA, not directly to adapters
+- adapters consume `assetId` references, not raw/base64 payloads
+- guest-owned media and RTC sessions are bound to `SSMA_ANON_COOKIE` (`ssma_anon` by default)
+- RTC signaling is ephemeral channel traffic and does not enter durable optimistic replay
 
 ## Templates
 
@@ -113,7 +148,7 @@ Current ecosystem direction:
 - a Tauri-specific transport/runtime should not be added until the architecture explicitly commits to it
 
 See:
-- [`roadmap.md`](roadmap.md)
+- [`docs/roadmap/rust-parity-checklist.md`](docs/roadmap/rust-parity-checklist.md)
 - [`ssma_backend_starter.md`](ssma_backend_starter.md)
 - [`ssma_tauri.md`](ssma_tauri.md)
 

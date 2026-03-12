@@ -20,15 +20,20 @@ struct ToyBackendState {
     apply_count: Arc<Mutex<HashMap<String, usize>>>,
 }
 
-async fn toy_apply(
-    State(state): State<ToyBackendState>,
-    Json(body): Json<Value>,
-) -> Json<Value> {
-    let intents = body.get("intents").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+async fn toy_apply(State(state): State<ToyBackendState>, Json(body): Json<Value>) -> Json<Value> {
+    let intents = body
+        .get("intents")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let mut results = Vec::new();
     let mut events = Vec::new();
     for intent in intents {
-        let id = intent.get("id").and_then(|v| v.as_str()).unwrap_or("missing-id").to_string();
+        let id = intent
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("missing-id")
+            .to_string();
         {
             let mut count = state.apply_count.lock().expect("apply_count lock");
             *count.entry(id.clone()).or_insert(0) += 1;
@@ -123,19 +128,26 @@ async fn spawn_gateway_with(
     Ok((format!("127.0.0.1:{}", addr.port()), handle))
 }
 
-async fn spawn_gateway(backend_url: String, require_auth: bool) -> Result<(String, tokio::task::JoinHandle<()>)> {
+async fn spawn_gateway(
+    backend_url: String,
+    require_auth: bool,
+) -> Result<(String, tokio::task::JoinHandle<()>)> {
     spawn_gateway_with(backend_url, require_auth, |_| {}).await
 }
 
 async fn ws_wait_for(
-    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
     ty: &str,
 ) -> Result<Value> {
     ws_wait_for_with_timeout(ws, ty, Duration::from_secs(6)).await
 }
 
 async fn ws_wait_for_with_timeout(
-    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
     ty: &str,
     wait_for: Duration,
 ) -> Result<Value> {
@@ -171,12 +183,11 @@ async fn sse_wait_for_with_headers_timeout(
     cookie: Option<&str>,
     wait_for: Duration,
 ) -> Result<Value> {
-    let mut request = reqwest::Client::new()
-        .get(format!(
-            "http://{}/optimistic/events{}",
-            base,
-            query.unwrap_or("")
-        ));
+    let mut request = reqwest::Client::new().get(format!(
+        "http://{}/optimistic/events{}",
+        base,
+        query.unwrap_or("")
+    ));
     if let Some(value) = cookie {
         request = request.header("Cookie", value);
     }
@@ -207,7 +218,8 @@ async fn sse_wait_for_with_headers_timeout(
                 }
             }
             if wanted.contains(&ty.as_str()) {
-                let parsed = serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!({"raw": data}));
+                let parsed =
+                    serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!({"raw": data}));
                 return Ok(json!({"type": ty, "data": parsed}));
             }
         }
@@ -238,7 +250,28 @@ fn issue_session_cookie(secret: &str, user_id: &str, role: &str) -> Result<Strin
     Ok(format!("ssma_session={}", token))
 }
 
-async fn connect_with_cookie(url: String, cookie: Option<&str>) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>> {
+fn extract_cookie(response: &reqwest::Response, name: &str) -> Option<String> {
+    response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|value| {
+            let prefix = format!("{}=", name);
+            value
+                .split(';')
+                .next()
+                .filter(|segment| segment.starts_with(&prefix))
+                .map(|segment| segment.to_string())
+        })
+}
+
+async fn connect_with_cookie(
+    url: String,
+    cookie: Option<&str>,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+> {
     let mut request = url.into_client_request()?;
     if let Some(value) = cookie {
         request.headers_mut().insert("Cookie", value.parse()?);
@@ -253,11 +286,19 @@ async fn scenarios_a_to_f() -> Result<()> {
     let (gateway_base, gateway_handle) = spawn_gateway(backend_base.clone(), false).await?;
 
     // A + F
-    let (mut ws, _) = connect_async(format!("ws://{}/optimistic/ws?role=leader&site=default&subprotocol=1.0.0", gateway_base)).await?;
+    let (mut ws, _) = connect_async(format!(
+        "ws://{}/optimistic/ws?role=leader&site=default&subprotocol=1.0.0",
+        gateway_base
+    ))
+    .await?;
     let _ = ws_wait_for(&mut ws, "hello").await?;
     let _ = ws_wait_for(&mut ws, "replay").await?;
 
-    let (mut mismatch, _) = connect_async(format!("ws://{}/optimistic/ws?role=leader&site=default&subprotocol=2.0.0", gateway_base)).await?;
+    let (mut mismatch, _) = connect_async(format!(
+        "ws://{}/optimistic/ws?role=leader&site=default&subprotocol=2.0.0",
+        gateway_base
+    ))
+    .await?;
     let mismatch_error = ws_wait_for(&mut mismatch, "error").await?;
     assert_eq!(mismatch_error["code"], "SUBPROTOCOL_MISMATCH");
 
@@ -271,7 +312,8 @@ async fn scenarios_a_to_f() -> Result<()> {
                 "payload": {"id":"todo-1","title":"one"},
                 "meta": {"clock": now_millis(), "channels": ["global"]}
             }]
-        }).to_string(),
+        })
+        .to_string(),
     ))
     .await?;
     let ack = ws_wait_for(&mut ws, "ack").await?;
@@ -288,17 +330,24 @@ async fn scenarios_a_to_f() -> Result<()> {
                 "payload": {"id":"todo-1","title":"one"},
                 "meta": {"clock": now_millis(), "channels": ["global"]}
             }]
-        }).to_string(),
+        })
+        .to_string(),
     ))
     .await?;
     let retry_ack = ws_wait_for(&mut ws, "ack").await?;
     assert_eq!(retry_ack["intents"][0]["status"], "acked");
 
-    let metrics = reqwest::get(format!("{}/metrics", backend_base)).await?.json::<Value>().await?;
+    let metrics = reqwest::get(format!("{}/metrics", backend_base))
+        .await?
+        .json::<Value>()
+        .await?;
     let count = metrics
         .get("applyCountByIntent")
         .and_then(|v| v.as_array())
-        .and_then(|rows| rows.iter().find(|r| r.get("id") == Some(&json!("i-1-abcdefg"))))
+        .and_then(|rows| {
+            rows.iter()
+                .find(|r| r.get("id") == Some(&json!("i-1-abcdefg")))
+        })
         .and_then(|r| r.get("count"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
@@ -318,7 +367,8 @@ async fn scenarios_a_to_f() -> Result<()> {
                 "payload": {"id":"todo-2","title":"two"},
                 "meta": {"clock": now_millis(), "channels": ["global"]}
             }]
-        }).to_string(),
+        })
+        .to_string(),
     ))
     .await?;
     let _ = ws_wait_for(&mut ws, "ack").await?;
@@ -329,27 +379,36 @@ async fn scenarios_a_to_f() -> Result<()> {
     );
 
     // D unauthorized when auth required (separate gateway instance)
-    let (auth_gateway_base, auth_gateway_handle) = spawn_gateway(backend_base.clone(), true).await?;
-    let (mut unauth, _) = connect_async(format!("ws://{}/optimistic/ws?role=leader&site=default&subprotocol=1.0.0", auth_gateway_base)).await?;
+    let (auth_gateway_base, auth_gateway_handle) =
+        spawn_gateway(backend_base.clone(), true).await?;
+    let (mut unauth, _) = connect_async(format!(
+        "ws://{}/optimistic/ws?role=leader&site=default&subprotocol=1.0.0",
+        auth_gateway_base
+    ))
+    .await?;
     let _ = ws_wait_for(&mut unauth, "hello").await?;
     let _ = ws_wait_for(&mut unauth, "replay").await?;
-    unauth.send(Message::Text(
-        json!({
-            "type": "intent.batch",
-            "intents": [{
-                "id": "i-unauth-0001",
-                "intent": "TODO_CREATE",
-                "payload": {"id":"todo-x"},
-                "meta": {"clock": 1}
-            }]
-        }).to_string()
-    )).await?;
+    unauth
+        .send(Message::Text(
+            json!({
+                "type": "intent.batch",
+                "intents": [{
+                    "id": "i-unauth-0001",
+                    "intent": "TODO_CREATE",
+                    "payload": {"id":"todo-x"},
+                    "meta": {"clock": 1}
+                }]
+            })
+            .to_string(),
+        ))
+        .await?;
     let unauth_error = ws_wait_for(&mut unauth, "error").await?;
     assert_eq!(unauth_error["code"], "UNAUTHORIZED");
 
     // E channel snapshot
     ws.send(Message::Text(
-        json!({ "type": "channel.subscribe", "channel": "global", "params": { "scope": "all" } }).to_string(),
+        json!({ "type": "channel.subscribe", "channel": "global", "params": { "scope": "all" } })
+            .to_string(),
     ))
     .await?;
     let sub_ack = ws_wait_for(&mut ws, "channel.ack").await?;
@@ -369,7 +428,8 @@ async fn scenarios_a_to_f() -> Result<()> {
                 "payload": {"id":"todo-3","title":"three"},
                 "meta": {"clock": now_millis(), "channels": ["global"]}
             }]
-        }).to_string(),
+        })
+        .to_string(),
     ))
     .await?;
     let _ = ws_wait_for(&mut ws, "ack").await?;
@@ -384,16 +444,32 @@ async fn scenarios_a_to_f() -> Result<()> {
         .json::<Value>()
         .await?;
     assert_eq!(gateway_metrics["status"], "ok");
-    assert!(gateway_metrics["totals"]["broadcasts"].as_u64().unwrap_or(0) >= 1);
-    assert!(gateway_metrics["serverEvents"]["CHANNEL_SUBSCRIBE"].as_u64().unwrap_or(0) >= 1);
-    assert!(gateway_metrics["serverEvents"]["INTENT_ACKED"].as_u64().unwrap_or(0) >= 1);
+    assert!(
+        gateway_metrics["totals"]["broadcasts"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1
+    );
+    assert!(
+        gateway_metrics["serverEvents"]["CHANNEL_SUBSCRIBE"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1
+    );
+    assert!(
+        gateway_metrics["serverEvents"]["INTENT_ACKED"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1
+    );
 
     // RBAC deny on protected channels
-    let (rbac_gateway_base, rbac_gateway_handle) = spawn_gateway_with(backend_base.clone(), false, |config| {
-        config.protected_channels = vec!["admin-only".to_string()];
-        config.protected_channel_min_role = "admin".to_string();
-    })
-    .await?;
+    let (rbac_gateway_base, rbac_gateway_handle) =
+        spawn_gateway_with(backend_base.clone(), false, |config| {
+            config.protected_channels = vec!["admin-only".to_string()];
+            config.protected_channel_min_role = "admin".to_string();
+        })
+        .await?;
     let (mut rbac_ws, _) = connect_async(format!(
         "ws://{}/optimistic/ws?role=follower&site=default&subprotocol=1.0.0",
         rbac_gateway_base
@@ -403,7 +479,8 @@ async fn scenarios_a_to_f() -> Result<()> {
     let _ = ws_wait_for(&mut rbac_ws, "replay").await?;
     rbac_ws
         .send(Message::Text(
-            json!({ "type": "channel.subscribe", "channel": "admin-only", "params": {} }).to_string(),
+            json!({ "type": "channel.subscribe", "channel": "admin-only", "params": {} })
+                .to_string(),
         ))
         .await?;
     let denied = ws_wait_for(&mut rbac_ws, "channel.ack").await?;
@@ -422,13 +499,12 @@ async fn scenarios_a_to_f() -> Result<()> {
 async fn jwt_auth_controls_protected_channels_and_island_invalidations() -> Result<()> {
     let (backend_base, backend_handle) = spawn_toy_backend().await?;
     let jwt_secret = "test-secret";
-    let (gateway_base, gateway_handle) =
-        spawn_gateway_with(backend_base, false, |config| {
-            config.auth_jwt_secret = jwt_secret.to_string();
-            config.protected_channels = vec!["ops.audit".to_string()];
-            config.protected_channel_min_role = "staff".to_string();
-        })
-        .await?;
+    let (gateway_base, gateway_handle) = spawn_gateway_with(backend_base, false, |config| {
+        config.auth_jwt_secret = jwt_secret.to_string();
+        config.protected_channels = vec!["ops.audit".to_string()];
+        config.protected_channel_min_role = "staff".to_string();
+    })
+    .await?;
 
     let guest_url = format!(
         "ws://{}/optimistic/ws?role=follower&site=default&subprotocol=1.0.0",
@@ -528,15 +604,23 @@ async fn jwt_auth_controls_protected_channels_and_island_invalidations() -> Resu
     assert_eq!(staff_sse_event["data"]["reason"], "ops-refresh");
 
     let guest_sse_result = guest_sse.await?;
-    assert!(guest_sse_result.is_err(), "guest SSE unexpectedly received protected island event");
+    assert!(
+        guest_sse_result.is_err(),
+        "guest SSE unexpectedly received protected island event"
+    );
 
     let staff_ws_event =
-        ws_wait_for_with_timeout(&mut staff_ws, "island.invalidate", Duration::from_secs(2)).await?;
+        ws_wait_for_with_timeout(&mut staff_ws, "island.invalidate", Duration::from_secs(2))
+            .await?;
     assert_eq!(staff_ws_event["islandId"], "ops.dashboard");
     assert_eq!(staff_ws_event["reason"], "ops-refresh");
 
-    let guest_island_event =
-        ws_wait_for_with_timeout(&mut guest_ws, "island.invalidate", Duration::from_millis(700)).await;
+    let guest_island_event = ws_wait_for_with_timeout(
+        &mut guest_ws,
+        "island.invalidate",
+        Duration::from_millis(700),
+    )
+    .await;
     assert!(
         guest_island_event.is_err(),
         "guest WS unexpectedly received protected island event"
@@ -544,6 +628,236 @@ async fn jwt_auth_controls_protected_channels_and_island_invalidations() -> Resu
 
     gateway_handle.abort();
     backend_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn media_assets_enforce_cookie_ownership_and_backend_token() -> Result<()> {
+    let (gateway_base, gateway_handle) = spawn_gateway_with(String::new(), false, |config| {
+        config.backend_internal_token = "test-backend-token".to_string();
+        config.media_max_upload_bytes = 1_024;
+    })
+    .await?;
+
+    let client = reqwest::Client::new();
+    let form = reqwest::multipart::Form::new().part(
+        "file",
+        reqwest::multipart::Part::bytes(b"RIFFtest-wave".to_vec())
+            .file_name("sample.wav")
+            .mime_str("audio/wav")?,
+    );
+    let upload = client
+        .post(format!("http://{}/media/assets", gateway_base))
+        .multipart(form)
+        .send()
+        .await?;
+    assert_eq!(upload.status(), reqwest::StatusCode::CREATED);
+    let anon_cookie = extract_cookie(&upload, "ssma_anon").expect("anonymous cookie");
+    let upload_json = upload.json::<Value>().await?;
+    let asset_id = upload_json["asset"]["assetId"]
+        .as_str()
+        .expect("asset id")
+        .to_string();
+    assert_eq!(upload_json["asset"]["mediaType"], "audio");
+
+    let unauthorized = client
+        .get(format!("http://{}/media/assets/{}", gateway_base, asset_id))
+        .send()
+        .await?;
+    assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let owned_metadata = client
+        .get(format!("http://{}/media/assets/{}", gateway_base, asset_id))
+        .header("Cookie", &anon_cookie)
+        .send()
+        .await?;
+    assert_eq!(owned_metadata.status(), reqwest::StatusCode::OK);
+
+    let content = client
+        .get(format!(
+            "http://{}/media/assets/{}/content",
+            gateway_base, asset_id
+        ))
+        .header("Cookie", &anon_cookie)
+        .send()
+        .await?;
+    assert_eq!(content.status(), reqwest::StatusCode::OK);
+    assert_eq!(content.bytes().await?.as_ref(), b"RIFFtest-wave");
+
+    let internal_denied = client
+        .get(format!(
+            "http://{}/internal/assets/{}",
+            gateway_base, asset_id
+        ))
+        .send()
+        .await?;
+    assert_eq!(internal_denied.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let internal_ok = client
+        .get(format!(
+            "http://{}/internal/assets/{}",
+            gateway_base, asset_id
+        ))
+        .header("x-ssma-backend-token", "test-backend-token")
+        .send()
+        .await?;
+    assert_eq!(internal_ok.status(), reqwest::StatusCode::OK);
+
+    let internal_content = client
+        .get(format!(
+            "http://{}/internal/assets/{}/content",
+            gateway_base, asset_id
+        ))
+        .header("x-ssma-backend-token", "test-backend-token")
+        .send()
+        .await?;
+    assert_eq!(internal_content.status(), reqwest::StatusCode::OK);
+    assert_eq!(internal_content.bytes().await?.as_ref(), b"RIFFtest-wave");
+
+    let oversized_form = reqwest::multipart::Form::new().part(
+        "file",
+        reqwest::multipart::Part::bytes(vec![0_u8; 1_025])
+            .file_name("too-big.wav")
+            .mime_str("audio/wav")?,
+    );
+    let oversized = client
+        .post(format!("http://{}/media/assets", gateway_base))
+        .multipart(oversized_form)
+        .send()
+        .await?;
+    assert!(
+        oversized.status() == reqwest::StatusCode::PAYLOAD_TOO_LARGE
+            || oversized.status() == reqwest::StatusCode::BAD_REQUEST
+    );
+
+    let deleted = client
+        .delete(format!("http://{}/media/assets/{}", gateway_base, asset_id))
+        .header("Cookie", &anon_cookie)
+        .send()
+        .await?;
+    assert_eq!(deleted.status(), reqwest::StatusCode::OK);
+
+    let missing = client
+        .get(format!("http://{}/media/assets/{}", gateway_base, asset_id))
+        .header("Cookie", &anon_cookie)
+        .send()
+        .await?;
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    gateway_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn rtc_signals_are_ephemeral_and_require_shared_actor_identity() -> Result<()> {
+    let (gateway_base, gateway_handle) = spawn_gateway(String::new(), false).await?;
+    let client = reqwest::Client::new();
+
+    let create = client
+        .post(format!("http://{}/rtc/sessions", gateway_base))
+        .json(&json!({}))
+        .send()
+        .await?;
+    assert_eq!(create.status(), reqwest::StatusCode::CREATED);
+    let anon_cookie = extract_cookie(&create, "ssma_anon").expect("anonymous cookie");
+    let create_json = create.json::<Value>().await?;
+    let session_id = create_json["session"]["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+    let channel = create_json["session"]["channel"]
+        .as_str()
+        .expect("channel")
+        .to_string();
+
+    let ws_url = format!(
+        "ws://{}/optimistic/ws?role=follower&site=default&subprotocol=1.0.0",
+        gateway_base
+    );
+    let mut ws = connect_with_cookie(ws_url.clone(), Some(&anon_cookie)).await?;
+    let _ = ws_wait_for(&mut ws, "hello").await?;
+    let replay = ws_wait_for(&mut ws, "replay").await?;
+    assert_eq!(
+        replay["intents"]
+            .as_array()
+            .map(|rows| rows.len())
+            .unwrap_or(0),
+        0
+    );
+
+    ws.send(Message::Text(
+        json!({ "type": "channel.subscribe", "channel": channel, "params": {} }).to_string(),
+    ))
+    .await?;
+    let ack = ws_wait_for(&mut ws, "channel.ack").await?;
+    assert_eq!(ack["status"], "ok");
+    let snapshot = ws_wait_for(&mut ws, "channel.snapshot").await?;
+    assert_eq!(
+        snapshot["intents"]
+            .as_array()
+            .map(|rows| rows.len())
+            .unwrap_or(0),
+        0
+    );
+
+    let outsider = client
+        .post(format!(
+            "http://{}/rtc/sessions/{}/signals",
+            gateway_base, session_id
+        ))
+        .json(&json!({
+            "kind": "offer",
+            "senderId": "peer-a",
+            "payload": { "sdp": "v=0" }
+        }))
+        .send()
+        .await?;
+    assert_eq!(outsider.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let signal_response = client
+        .post(format!(
+            "http://{}/rtc/sessions/{}/signals",
+            gateway_base, session_id
+        ))
+        .header("Cookie", &anon_cookie)
+        .json(&json!({
+            "kind": "offer",
+            "senderId": "peer-a",
+            "targetId": "peer-b",
+            "payload": { "sdp": "v=0" }
+        }))
+        .send()
+        .await?;
+    assert_eq!(signal_response.status(), reqwest::StatusCode::OK);
+
+    let invalidate = ws_wait_for(&mut ws, "channel.invalidate").await?;
+    assert_eq!(invalidate["channel"], create_json["session"]["channel"]);
+    assert_eq!(invalidate["intents"][0]["payload"]["kind"], "offer");
+
+    let mut replay_ws = connect_with_cookie(ws_url, Some(&anon_cookie)).await?;
+    let _ = ws_wait_for(&mut replay_ws, "hello").await?;
+    let replay_after = ws_wait_for(&mut replay_ws, "replay").await?;
+    assert_eq!(
+        replay_after["intents"]
+            .as_array()
+            .map(|rows| rows.len())
+            .unwrap_or(0),
+        0,
+        "rtc signals must stay out of durable replay"
+    );
+    replay_ws
+        .send(Message::Text(
+            json!({ "type": "channel.subscribe", "channel": create_json["session"]["channel"], "params": {} }).to_string(),
+        ))
+        .await?;
+    let _ = ws_wait_for(&mut replay_ws, "channel.ack").await?;
+    let replay_snapshot = ws_wait_for(&mut replay_ws, "channel.snapshot").await?;
+    assert_eq!(
+        replay_snapshot["intents"][0]["payload"]["targetId"],
+        "peer-b"
+    );
+
+    gateway_handle.abort();
     Ok(())
 }
 

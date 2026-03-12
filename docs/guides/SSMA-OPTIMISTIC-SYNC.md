@@ -2,6 +2,11 @@
 
 This guide documents how the SSMA backend ingests optimistic actions from CSMA clients, validates them, and streams acknowledgements/invalidation events back to the fleet. It complements the CSMA-side `optimistic-sync` module docs.
 
+Session A addendum for `ssma-rust`:
+- SSMA itself now owns media upload/download for frontend clients.
+- Backend adapters consume `assetId` references and fetch media through backend-token-protected internal SSMA routes.
+- RTC signaling is handled as an ephemeral channel workflow, not a persisted optimistic intent workflow.
+
 ## Runtime Components
 
 | Component | Path | Responsibility |
@@ -51,6 +56,10 @@ When a batch passes validation:
 3. `OptimisticEventHub` publishes `event: invalidate` SSE messages so follower tabs refresh.
 4. Pending reasons are cleared (`releaseReason(id, 'pending')`); replay reasons expire automatically past `config.optimistic.replayWindowMs`.
 
+Durable vs ephemeral rule:
+- persisted user/app actions go through `intent.batch` and are replayable
+- backend stream events, RTC signaling, and other live deltas fan out ephemerally and are not written into replay storage
+
 Channel subscriptions use a parallel path:
 
 1. `channel.subscribe` returns `channel.ack` and then `channel.snapshot`.
@@ -72,7 +81,38 @@ SSMA uses one session-token contract everywhere:
 - `ChannelRegistry` delegates every subscription through `access(params, { connection })` handlers, so sensitive channels (e.g. `ops.audit`) can require `staff` or `system` roles before replay snapshots are sent.
 - HTTP routes (`/optimistic/rework`, `/optimistic/undo`, `/admin/optimistic/*`) gate access through role helpers, ensuring only privileged operators can rework or inspect intents.
 - **Guests vs. WS** – unauthenticated clients are allowed to connect and operate as `guest`. Protected channels and island invalidations still enforce RBAC, and writes can still be blocked when `SSMA_OPTIMISTIC_REQUIRE_AUTH_WRITES=true`.
+- **Guests vs. media** – guest-owned media assets and RTC sessions are bound to the anonymous session cookie (`SSMA_ANON_COOKIE`, default `ssma_anon`), not to transient websocket connection ids.
 - **SSE and RBAC** – `/optimistic/events` stays open to guests, but island invalidations are filtered by role and optional `?islands=a,b` scoping before delivery. SSE never delivers ACKs, so anonymous users will still see pending intents if they try to publish while writes require auth.
+
+## Media lane (Rust Session A)
+
+- `POST /media/assets`
+- `GET /media/assets/:assetId`
+- `GET /media/assets/:assetId/content`
+- `DELETE /media/assets/:assetId`
+
+The media lane is gateway-owned:
+- uploads are binary `multipart/form-data`
+- SSMA validates MIME family and size before accepting the asset
+- uploaded assets are stored as temp files with in-memory metadata and TTL cleanup
+- Session A does not guarantee asset durability across gateway restart
+
+Backend-only asset fetch:
+- `GET /internal/assets/:assetId`
+- `GET /internal/assets/:assetId/content`
+- requires `x-ssma-backend-token`
+
+## RTC signaling lane (Rust Session A)
+
+- `POST /rtc/sessions`
+- `POST /rtc/sessions/:sessionId/signals`
+- channel convention: `rtc.session.<sessionId>`
+
+Session A scope:
+- SSMA is signaling/session coordinator only
+- RTC signals fan out as ephemeral `channel.invalidate` payloads
+- RTC signal history is available in channel snapshots/resync, but not in durable replay
+- relay/SFU/media forwarding is intentionally out of scope
 
 ## Rate limiting & transport hardening
 

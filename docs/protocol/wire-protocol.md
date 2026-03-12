@@ -38,6 +38,26 @@ Canonical schemas live in `packages/ssma-protocol/contracts/`.
 | `island.invalidate` | island-level invalidation payload |
 | `rework` / `undo` | optional operational events |
 
+Session A rule:
+- model token deltas, RTC signaling, and other ephemeral stream events may fan out as `invalidate` payloads on request/session channels, but they do **not** enter the durable replay store.
+- replay is for persisted optimistic intents only.
+
+## HTTP media + RTC (Rust Session A)
+
+| Route | Purpose |
+|---|---|
+| `POST /media/assets` | Upload binary image/audio and receive an `assetId`. |
+| `GET /media/assets/:assetId` | Asset metadata for the current owner/session. |
+| `GET /media/assets/:assetId/content` | Raw asset bytes for the current owner/session. |
+| `DELETE /media/assets/:assetId` | Release uploaded asset. |
+| `POST /rtc/sessions` | Create a signaling session and return `rtc.session.<id>` channel name. |
+| `POST /rtc/sessions/:sessionId/signals` | Submit an offer/answer/candidate-style signal payload. |
+
+Internal adapter fetch:
+- `GET /internal/assets/:assetId`
+- `GET /internal/assets/:assetId/content`
+- Both require `x-ssma-backend-token`.
+
 ## Error codes
 
 Common codes:
@@ -45,5 +65,7 @@ Common codes:
 - `INVALID_CONTRACT`
 - `SUBPROTOCOL_MISMATCH`
 - `UNAUTHORIZED`
+- `UNAUTHORIZED_BACKEND_REQUEST`
 - `RATE_LIMITED`
+- `PAYLOAD_TOO_LARGE`
 - `UNKNOWN_TYPE`
