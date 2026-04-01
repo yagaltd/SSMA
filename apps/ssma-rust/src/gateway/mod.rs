@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod auth;
 pub mod internal;
 pub mod media;
 pub mod rtc;
@@ -37,6 +38,7 @@ pub struct AppState {
     pub store: IntentStore,
     pub backend: BackendHttpClient,
     pub events: broadcast::Sender<Value>,
+    pub(crate) user_store: Arc<auth::UserStore>,
     pub(crate) assets: Arc<Mutex<HashMap<String, AssetRecord>>>,
     pub(crate) rtc_sessions: Arc<Mutex<HashMap<String, RtcSessionRecord>>>,
     pub(crate) audio_sessions: Arc<Mutex<HashMap<String, AudioSessionRecord>>>,
@@ -289,11 +291,13 @@ pub fn build_state(config: Config) -> Arc<AppState> {
     let store = IntentStore::new(config.intent_store_path.clone(), config.replay_window_ms);
     let backend = BackendHttpClient::new(config.backend_url.clone());
     let (events, _) = broadcast::channel(1024);
+    let user_store = Arc::new(auth::UserStore::new(config.user_store_path.clone()));
     Arc::new(AppState {
         config,
         store,
         backend,
         events,
+        user_store,
         assets: Arc::new(Mutex::new(HashMap::new())),
         rtc_sessions: Arc::new(Mutex::new(HashMap::new())),
         audio_sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -309,6 +313,10 @@ pub fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/query/:name", post(public_query))
+        .route("/auth/register", post(auth::register))
+        .route("/auth/login", post(auth::login))
+        .route("/auth/logout", post(auth::logout))
+        .route("/auth/me", get(auth::me))
         .route("/media/assets", post(media::upload_media))
         .route(
             "/media/assets/:asset_id",

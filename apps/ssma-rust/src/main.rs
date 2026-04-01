@@ -1,6 +1,5 @@
 use ssma_rust::gateway;
-use ssma_rust::runtime::Config;
-
+use ssma_rust::config::Config;
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();

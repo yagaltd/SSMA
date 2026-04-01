@@ -94,6 +94,55 @@ impl BackendHttpClient {
             .await
     }
 
+    pub fn ws_url(&self, path: &str) -> String {
+        if let Some(rest) = self.base_url.strip_prefix("https://") {
+            format!("wss://{}{}", rest.trim_end_matches('/'), path)
+        } else if let Some(rest) = self.base_url.strip_prefix("http://") {
+            format!("ws://{}{}", rest.trim_end_matches('/'), path)
+        } else {
+            format!("ws://{}{}", self.base_url.trim_end_matches('/'), path)
+        }
+    }
+
+    pub async fn create_audio_session(&self, payload: Value) -> Result<Value, reqwest::Error> {
+        self.post_json("/internal/audio/sessions", payload).await
+    }
+
+    pub async fn get_audio_session(&self, session_id: &str) -> Result<Value, reqwest::Error> {
+        let url = format!(
+            "{}/internal/audio/sessions/{}",
+            self.base_url,
+            urlencoding::encode(session_id)
+        );
+        let response = self.client.get(url).send().await?;
+        response.json::<Value>().await
+    }
+
+    pub async fn delete_audio_session(&self, session_id: &str) -> Result<Value, reqwest::Error> {
+        let url = format!(
+            "{}/internal/audio/sessions/{}",
+            self.base_url,
+            urlencoding::encode(session_id)
+        );
+        let response = self.client.delete(url).send().await?;
+        response.json::<Value>().await
+    }
+
+    pub async fn command_audio_session(
+        &self,
+        session_id: &str,
+        payload: Value,
+    ) -> Result<Value, reqwest::Error> {
+        self.post_json(
+            &format!(
+                "/internal/audio/sessions/{}/commands",
+                urlencoding::encode(session_id)
+            ),
+            payload,
+        )
+        .await
+    }
+
     async fn post_json(&self, path: &str, payload: Value) -> Result<Value, reqwest::Error> {
         let url = format!("{}{}", self.base_url, path);
         let response = self.client.post(url).json(&payload).send().await?;
