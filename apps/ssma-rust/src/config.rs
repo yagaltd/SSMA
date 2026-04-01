@@ -29,6 +29,14 @@ pub struct Config {
     pub jwt_audience: String,
     pub access_ttl_ms: u64,
     pub auth_cookie_secure: bool,
+    pub allowed_origins: String,
+    pub optimistic_rework_window_ms: u64,
+    pub optimistic_rework_max: u32,
+    pub sse_retry_ms: u64,
+    pub ws_max_buffered_bytes: u64,
+    pub optimistic_max_entries: usize,
+    pub log_relay_url: String,
+    pub backend_timeout_ms: u64,
 }
 
 impl Config {
@@ -117,6 +125,33 @@ impl Config {
         let auth_cookie_secure = std::env::var("SSMA_AUTH_COOKIE_SECURE")
             .map(|v| v == "true")
             .unwrap_or(true);
+        let allowed_origins =
+            std::env::var("SSMA_ALLOWED_ORIGINS").unwrap_or_else(|_| "*".to_string());
+        let optimistic_rework_window_ms = std::env::var("SSMA_OPTIMISTIC_REWORK_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300_000);
+        let optimistic_rework_max = std::env::var("SSMA_OPTIMISTIC_REWORK_MAX")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(50);
+        let sse_retry_ms = std::env::var("SSMA_SSE_RETRY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(2500);
+        let ws_max_buffered_bytes = std::env::var("SSMA_WS_MAX_BUFFERED_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(262144);
+        let optimistic_max_entries = std::env::var("SSMA_OPTIMISTIC_MAX_ENTRIES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(5000);
+        let log_relay_url = std::env::var("SSMA_LOG_RELAY_URL").unwrap_or_default();
+        let backend_timeout_ms = std::env::var("SSMA_BACKEND_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5000);
 
         Self {
             host,
@@ -145,6 +180,14 @@ impl Config {
             jwt_audience,
             access_ttl_ms,
             auth_cookie_secure,
+            allowed_origins,
+            optimistic_rework_window_ms,
+            optimistic_rework_max,
+            sse_retry_ms,
+            ws_max_buffered_bytes,
+            optimistic_max_entries,
+            log_relay_url,
+            backend_timeout_ms,
         }
     }
 }

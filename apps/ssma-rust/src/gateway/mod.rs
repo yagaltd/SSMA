@@ -1,7 +1,10 @@
+pub mod admin;
 pub mod audio;
 pub mod auth;
 pub mod internal;
+pub mod logs;
 pub mod media;
+pub mod optimistic;
 pub mod rtc;
 pub mod sse;
 pub mod ws;
@@ -15,6 +18,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use tower_http::cors::{Any, CorsLayer};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -288,7 +292,7 @@ pub fn build_state(config: Config) -> Arc<AppState> {
             }
         }
     }
-    let store = IntentStore::new(config.intent_store_path.clone(), config.replay_window_ms);
+    let store = IntentStore::new(config.intent_store_path.clone(), config.replay_window_ms, config.optimistic_max_entries);
     let backend = BackendHttpClient::new(config.backend_url.clone());
     let (events, _) = broadcast::channel(1024);
     let user_store = Arc::new(auth::UserStore::new(config.user_store_path.clone()));
@@ -334,9 +338,16 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .route("/rtc/sessions", post(rtc::create_rtc_session))
         .route("/rtc/sessions/:session_id/signals", post(rtc::post_rtc_signal))
+        .route("/logs/batch", post(logs::logs_batch))
+        .route("/logs/health", get(logs::logs_health))
         .route("/optimistic/metrics", get(metrics))
         .route("/optimistic/ws", get(ws::ws_upgrade))
         .route("/optimistic/events", get(sse::sse_events))
+        .route("/optimistic/rework", post(optimistic::optimistic_rework))
+        .route("/optimistic/undo", post(optimistic::optimistic_undo))
+        .route("/optimistic/pending", get(optimistic::optimistic_pending))
+        .route("/admin/optimistic/channels", get(admin::admin_channels))
+        .route("/admin/optimistic/intents", get(admin::admin_intents))
         .route("/internal/backend/events", post(internal::backend_events_ingest))
         .route("/internal/assets", post(internal::create_internal_asset))
         .route(
@@ -350,7 +361,23 @@ pub fn app(state: Arc<AppState>) -> Router {
         .layer(DefaultBodyLimit::max(
             state.config.media_max_upload_bytes as usize,
         ))
+        .layer(cors_layer(&state.config.allowed_origins))
         .with_state(state)
+}
+
+fn cors_layer(allowed_origins: &str) -> CorsLayer {
+    if allowed_origins == "*" {
+        CorsLayer::very_permissive()
+    } else {
+        let origins: Vec<_> = allowed_origins
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    }
 }
 
 pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {

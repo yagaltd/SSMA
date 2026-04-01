@@ -38,10 +38,11 @@ pub struct IntentStore {
     state: Arc<Mutex<PersistedStore>>,
     index: Arc<Mutex<HashMap<String, IntentRecord>>>,
     replay_window_ms: u64,
+    max_entries: usize,
 }
 
 impl IntentStore {
-    pub fn new(path: PathBuf, replay_window_ms: u64) -> Self {
+    pub fn new(path: PathBuf, replay_window_ms: u64, max_entries: usize) -> Self {
         let persisted = if path.exists() {
             fs::read_to_string(&path)
                 .ok()
@@ -65,6 +66,7 @@ impl IntentStore {
             state: Arc::new(Mutex::new(persisted)),
             index: Arc::new(Mutex::new(index)),
             replay_window_ms,
+            max_entries,
         }
     }
 
@@ -158,6 +160,9 @@ impl IntentStore {
         state
             .entries
             .retain(|entry| entry.inserted_at >= replay_start);
+        while state.entries.len() > self.max_entries {
+            state.entries.remove(0);
+        }
     }
 
     fn flush_locked(&self, state: &PersistedStore) -> std::io::Result<()> {

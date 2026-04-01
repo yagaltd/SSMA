@@ -58,6 +58,7 @@ async fn ws_session(socket: WebSocket, query: WsQuery, headers: HeaderMap, state
 
     let (mut sender, mut receiver) = socket.split();
     let mut event_rx = state.events.subscribe();
+    let max_pending_messages = (state.config.ws_max_buffered_bytes / 1024).max(1) as usize;
 
     let client_subprotocol = query
         .subprotocol
@@ -178,6 +179,24 @@ async fn ws_session(socket: WebSocket, query: WsQuery, headers: HeaderMap, state
                     Ok(event) => {
                         for frame in build_frames_for_connection(&state, &context, &event) {
                             let _ = sender.send(Message::Text(frame.to_string())).await;
+                        }
+                        // Backpressure check: count how many messages are buffered
+                        let mut pending = 0;
+                        while let Ok(event) = event_rx.try_recv() {
+                            pending += build_frames_for_connection(&state, &context, &event).len();
+                            if pending > max_pending_messages {
+                                break;
+                            }
+                        }
+                        if pending > max_pending_messages {
+                            let _ = sender.send(Message::Text(
+                                json!({ "type": "error", "code": "BACKPRESSURE_CLOSE" }).to_string(),
+                            )).await;
+                            let _ = sender.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                                code: 1008u16,
+                                reason: "backpressure".into(),
+                            }))).await;
+                            break;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {

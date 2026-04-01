@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 pub(crate) fn parse_requested_islands(raw: Option<&str>) -> Option<Vec<String>> {
     let islands = raw
@@ -66,8 +67,9 @@ pub(crate) async fn sse_events(
 
     let mut rx = state.events.subscribe();
     let state_for_stream = state.clone();
+    let retry_duration = Duration::from_millis(state.config.sse_retry_ms);
     let stream = stream! {
-        yield Ok(Event::default().event("ready").data(json!({ "service": "ssma-rust" }).to_string()));
+        yield Ok(Event::default().retry(retry_duration).event("ready").data(json!({ "service": "ssma-rust" }).to_string()));
         yield Ok(Event::default().event("replay").data(json!({ "intents": replay, "cursor": replay_cursor }).to_string()));
 
         loop {
@@ -103,7 +105,7 @@ pub(crate) async fn sse_events(
 
     Sse::new(stream).keep_alive(
         KeepAlive::new()
-            .interval(std::time::Duration::from_secs(20))
+            .interval(Duration::from_millis(state.config.sse_retry_ms))
             .text("keepalive"),
     )
 }

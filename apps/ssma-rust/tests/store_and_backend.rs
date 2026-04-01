@@ -10,7 +10,7 @@ use tokio::net::TcpListener;
 fn intent_store_assigns_monotonic_cursor() -> Result<()> {
     let path = std::env::temp_dir().join(format!("ssma-rust-store-{}.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let store = ssma_rust::runtime::IntentStore::new(path.clone(), 300_000);
+    let store = ssma_rust::runtime::IntentStore::new(path.clone(), 300_000, 5000);
     let now = ssma_rust::runtime::now_millis();
     let appended = store.append_batch(vec![
         ssma_rust::runtime::IntentRecord {
@@ -52,7 +52,7 @@ fn intent_store_dedupes_by_site_and_id() -> Result<()> {
         std::process::id()
     ));
     let _ = std::fs::remove_file(&path);
-    let store = ssma_rust::runtime::IntentStore::new(path.clone(), 300_000);
+    let store = ssma_rust::runtime::IntentStore::new(path.clone(), 300_000, 5000);
     let now = ssma_rust::runtime::now_millis();
     let one = ssma_rust::runtime::IntentRecord {
         id: "dup-1".to_string(),
