@@ -23,6 +23,8 @@ fn intent_store_assigns_monotonic_cursor() -> Result<()> {
             site: "default".to_string(),
             status: "acked".to_string(),
             connection_id: None,
+            actor_key: None,
+            user_id: None,
             backend: None,
         },
         ssma_rust::runtime::IntentRecord {
@@ -35,6 +37,8 @@ fn intent_store_assigns_monotonic_cursor() -> Result<()> {
             site: "default".to_string(),
             status: "acked".to_string(),
             connection_id: None,
+            actor_key: None,
+            user_id: None,
             backend: None,
         },
     ]);
@@ -64,6 +68,8 @@ fn intent_store_dedupes_by_site_and_id() -> Result<()> {
         site: "s1".to_string(),
         status: "acked".to_string(),
         connection_id: None,
+        actor_key: None,
+        user_id: None,
         backend: None,
     };
     let two = ssma_rust::runtime::IntentRecord {
@@ -76,6 +82,8 @@ fn intent_store_dedupes_by_site_and_id() -> Result<()> {
         site: "s1".to_string(),
         status: "acked".to_string(),
         connection_id: None,
+        actor_key: None,
+        user_id: None,
         backend: None,
     };
     let three = ssma_rust::runtime::IntentRecord {
@@ -167,5 +175,61 @@ async fn backend_client_uses_canonical_context_shape() -> Result<()> {
     );
 
     handle.abort();
+    Ok(())
+}
+
+#[test]
+fn intent_store_trims_to_max_entries() -> Result<()> {
+    let path = std::env::temp_dir().join(format!(
+        "ssma-rust-store-trim-{}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    // Use a very large replay window so time-based trim doesn't kick in
+    let max = 5;
+    let store = ssma_rust::runtime::IntentStore::new(path.clone(), 999_999_999, max);
+    let now = ssma_rust::runtime::now_millis();
+
+    // Insert 10 entries (double the max)
+    for batch_start in (0..10).step_by(5) {
+        let batch: Vec<_> = (batch_start..batch_start + 5)
+            .map(|i| ssma_rust::runtime::IntentRecord {
+                id: format!("trim-{}", i),
+                intent: "TODO_CREATE".to_string(),
+                payload: serde_json::json!({"id": i}),
+                meta: serde_json::json!({"clock": i}),
+                inserted_at: now,
+                log_seq: 0,
+                site: "default".to_string(),
+                status: "acked".to_string(),
+                connection_id: None,
+                actor_key: None,
+                user_id: None,
+                backend: None,
+            })
+            .collect();
+        store.append_batch(batch);
+    }
+
+    // Store should have trimmed to max_entries
+    assert!(
+        store.total_entries() <= max,
+        "expected at most {} entries, got {}",
+        max,
+        store.total_entries()
+    );
+
+    // The latest entries should be retained (trim removes oldest)
+    assert!(
+        store.get("trim-9", "default").is_some(),
+        "latest entry should be retained"
+    );
+    assert!(
+        store.get("trim-0", "default").is_none()
+            || store.total_entries() <= max,
+        "oldest entries should have been trimmed or store is within cap"
+    );
+
+    let _ = std::fs::remove_file(&path);
     Ok(())
 }

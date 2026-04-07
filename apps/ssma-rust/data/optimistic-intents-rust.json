@@ -1,4 +1,32 @@
 {
   "version": 1,
-  "entries": []
+  "entries": [
+    {
+      "id": "i-1-0001",
+      "intent": "TODO_CREATE",
+      "payload": {
+        "id": "todo-1",
+        "title": "one"
+      },
+      "meta": {
+        "channels": [
+          "global"
+        ],
+        "clock": 1,
+        "reasons": [
+          "pending",
+          "replay",
+          "channel:global"
+        ]
+      },
+      "inserted_at": 1775556982706,
+      "log_seq": 1,
+      "site": "default",
+      "status": "acked",
+      "connection_id": "b8cdffc8-afd3-4698-b758-6de7c08b9acf",
+      "actor_key": null,
+      "user_id": null,
+      "backend": null
+    }
+  ]
 }

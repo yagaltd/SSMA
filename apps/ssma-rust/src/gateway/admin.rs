@@ -1,5 +1,6 @@
 use crate::gateway::{
-    api_error, resolve_user_from_headers, role_rank, ApiResult, AppState, ResolvedUser,
+    api_error, optimistic, resolve_user_from_headers, role_rank, ApiResult, AppState,
+    ConnectionChannels,
 };
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -7,7 +8,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
@@ -16,7 +17,7 @@ pub(crate) struct IntentsQuery {
     limit: Option<usize>,
 }
 
-fn require_staff_role(headers: &HeaderMap, state: &AppState) -> ApiResult<ResolvedUser> {
+fn require_staff_role(headers: &HeaderMap, state: &AppState) -> ApiResult<crate::gateway::ResolvedUser> {
     let user = resolve_user_from_headers(headers, &state.config)
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
     if role_rank(&user.role) < role_rank("staff") {
@@ -34,36 +35,31 @@ pub(crate) async fn admin_channels(
     let registry = state
         .channel_registry
         .lock()
-        .expect("channel registry lock");
+        .expect("channel registry lock")
+        .clone();
 
-    // channel_name -> { count, sites }
-    let mut channels: BTreeMap<String, ChannelSummary> = BTreeMap::new();
-
-    for connection in registry.values() {
-        let mut seen_channels = BTreeSet::new();
-        for sub in connection.subscriptions.values() {
-            if seen_channels.insert(sub.channel.clone()) {
-                let entry = channels.entry(sub.channel.clone()).or_default();
-                entry.count += 1;
-                entry.sites.insert(connection.site.clone());
-            }
-        }
+    let mut grouped: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    let mut total_subscriptions = 0usize;
+    for (connection_id, row) in registry {
+        collect_connection_subscriptions(&mut grouped, &connection_id, &row, &mut total_subscriptions);
     }
 
-    let channels_json: Value = channels
+    let channels = grouped
         .into_iter()
-        .map(|(name, summary)| {
-            (
-                name,
-                json!({
-                    "count": summary.count,
-                    "sites": summary.sites.into_iter().collect::<Vec<_>>(),
-                }),
-            )
+        .map(|(channel, subscribers)| {
+            json!({
+                "channel": channel,
+                "total": subscribers.len(),
+                "subscribers": subscribers,
+            })
         })
-        .collect();
+        .collect::<Vec<_>>();
 
-    Ok(Json(json!({ "channels": channels_json })))
+    Ok(Json(json!({
+        "updatedAt": crate::runtime::now_millis(),
+        "totalSubscriptions": total_subscriptions,
+        "channels": channels,
+    })))
 }
 
 pub(crate) async fn admin_intents(
@@ -73,74 +69,42 @@ pub(crate) async fn admin_intents(
 ) -> ApiResult<impl IntoResponse> {
     let _user = require_staff_role(&headers, &state)?;
 
-    let limit = params.limit.unwrap_or(200).min(500).max(1);
+    let limit = params.limit.unwrap_or(100).clamp(1, 500);
+    let entries = optimistic::pending_entries(&state, params.reason.as_deref(), limit);
 
-    // Fetch more than needed to allow filtering, but cap at a reasonable multiplier
-    let fetch_limit = if params.reason.is_some() {
-        limit * 4
-    } else {
-        limit
-    };
-    let entries = state.store.entries_after(0, fetch_limit);
-
-    let filtered: Vec<IntentRecordJson> = entries
-        .into_iter()
-        .filter(|entry| {
-            if let Some(ref reason) = params.reason {
-                entry.intent == *reason
-            } else {
-                true
-            }
-        })
-        .take(limit)
-        .map(|entry| IntentRecordJson {
-            id: entry.id,
-            intent: entry.intent,
-            payload: entry.payload,
-            meta: entry.meta,
-            inserted_at: entry.inserted_at,
-            log_seq: entry.log_seq,
-            site: entry.site,
-            status: entry.status,
-            connection_id: entry.connection_id,
-            backend: entry.backend,
-        })
-        .collect();
-
-    let count = filtered.len();
-    let cursor = filtered.iter().map(|r| r.log_seq).max().unwrap_or(0);
+    let mut reason_summary = BTreeMap::<String, u64>::new();
+    for entry in &entries {
+        for reason in crate::gateway::reason_list(&entry.meta) {
+            *reason_summary.entry(reason).or_insert(0) += 1;
+        }
+    }
 
     Ok(Json(json!({
-        "intents": filtered,
-        "count": count,
-        "cursor": cursor,
+        "updatedAt": crate::runtime::now_millis(),
+        "pending": entries.iter().map(optimistic::pending_record_summary).collect::<Vec<_>>(),
+        "reasonSummary": reason_summary.into_iter().map(|(reason, count)| json!({ "reason": reason, "count": count })).collect::<Vec<_>>(),
+        "total": entries.len(),
     })))
 }
 
-struct ChannelSummary {
-    count: u64,
-    sites: BTreeSet<String>,
-}
-
-impl Default for ChannelSummary {
-    fn default() -> Self {
-        Self {
-            count: 0,
-            sites: BTreeSet::new(),
-        }
+fn collect_connection_subscriptions(
+    grouped: &mut BTreeMap<String, Vec<Value>>,
+    connection_id: &str,
+    row: &ConnectionChannels,
+    total_subscriptions: &mut usize,
+) {
+    for subscription in row.subscriptions.values() {
+        *total_subscriptions += 1;
+        grouped
+            .entry(subscription.channel.clone())
+            .or_default()
+            .push(json!({
+                "connectionId": connection_id,
+                "params": subscription.params,
+                "subscribedAt": subscription.subscribed_at,
+                "connectionRole": row.connection_role,
+                "site": row.site,
+                "user": row.user,
+            }));
     }
-}
-
-#[derive(serde::Serialize)]
-struct IntentRecordJson {
-    id: String,
-    intent: String,
-    payload: Value,
-    meta: Value,
-    inserted_at: i64,
-    log_seq: u64,
-    site: String,
-    status: String,
-    connection_id: Option<String>,
-    backend: Option<Value>,
 }

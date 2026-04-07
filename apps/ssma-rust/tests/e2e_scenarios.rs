@@ -1318,9 +1318,333 @@ async fn backend_audio_events_fan_out_on_audio_channels() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn sse_events_include_retry_field_matching_config() -> Result<()> {
+    let backend_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let backend_port = backend_listener.local_addr()?.port();
+    let backend_base = format!("127.0.0.1:{}", backend_port);
+    let toy_state = ToyBackendState::default();
+    let backend_app = Router::new()
+        .route("/apply", post(toy_apply))
+        .route("/metrics", get(toy_metrics))
+        .route("/query/:name", post(toy_query))
+        .route("/subscribe", post(toy_subscribe))
+        .route("/health", get(toy_health))
+        .with_state(toy_state);
+    tokio::spawn(async move {
+        let _ = axum::serve(backend_listener, backend_app).await;
+    });
+
+    let custom_retry_ms: u64 = 500;
+    let (gateway_base, gateway_handle) = spawn_gateway_with(
+        format!("http://{}", backend_base),
+        false,
+        |config| {
+            config.sse_retry_ms = custom_retry_ms;
+        },
+    )
+    .await?;
+
+    // Connect to SSE endpoint and read raw response
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!(
+            "http://{}/optimistic/events?site=default",
+            gateway_base
+        ))
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await?;
+
+    let mut stream = response.bytes_stream();
+    let mut buf = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            Ok(Some(Ok(chunk))) => {
+                buf.push_str(&String::from_utf8_lossy(chunk.as_ref()));
+                if buf.contains("retry:") && buf.contains("ready") {
+                    break;
+                }
+            }
+            Ok(Some(Err(_))) => break,
+            Ok(None) => break,
+            _ => continue,
+        }
+    }
+
+    assert!(
+        buf.contains(&format!("retry:{}", custom_retry_ms)),
+        "SSE stream should contain retry:{} field, got: {}",
+        custom_retry_ms,
+        buf
+    );
+
+    gateway_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn ws_connection_closed_on_backpressure() -> Result<()> {
+    let backend_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let backend_port = backend_listener.local_addr()?.port();
+    let backend_base = format!("127.0.0.1:{}", backend_port);
+    let toy_state = ToyBackendState::default();
+    let backend_app = Router::new()
+        .route("/apply", post(toy_apply))
+        .route("/metrics", get(toy_metrics))
+        .route("/query/:name", post(toy_query))
+        .route("/subscribe", post(toy_subscribe))
+        .route("/health", get(toy_health))
+        .with_state(toy_state);
+    tokio::spawn(async move {
+        let _ = axum::serve(backend_listener, backend_app).await;
+    });
+
+    // Set very low backpressure limit: 1024 bytes => 1 pending message max
+    let (gateway_base, gateway_handle) = spawn_gateway_with(
+        format!("http://{}", backend_base),
+        false,
+        |config| {
+            config.ws_max_buffered_bytes = 1024;
+        },
+    )
+    .await?;
+
+    // Connect WS client and subscribe to a channel
+    let mut ws = connect_async(format!(
+        "ws://{}/optimistic/ws?role=leader&site=default&subprotocol=1.0.0",
+        gateway_base
+    ))
+    .await?
+    .0;
+    let _hello = ws_wait_for(&mut ws, "hello").await?;
+    let _replay = ws_wait_for(&mut ws, "replay").await?;
+
+    ws.send(Message::Text(
+        json!({ "type": "channel.subscribe", "channel": "global", "params": { "scope": "all" } })
+            .to_string(),
+    ))
+    .await?;
+    let _snapshot = ws_wait_for(&mut ws, "channel.snapshot").await?;
+
+    // Now flood the broadcast channel by sending many intent batches
+    // Each triggers a broadcast event. With max_pending=1, the subscriber
+    // should hit backpressure quickly.
+    for i in 0..20 {
+        ws.send(Message::Text(
+            json!({
+                "type": "intent.batch",
+                "intents": [{
+                    "id": format!("bp-{}", i),
+                    "intent": "TODO_CREATE",
+                    "payload": {"id": format!("todo-bp-{}", i)},
+                    "meta": {"clock": 1000 + i, "channels": ["global"]}
+                }]
+            })
+            .to_string(),
+        ))
+        .await?;
+    }
+
+    // Wait for either BACKPRESSURE_CLOSE or connection close
+    let got_backpressure = timeout(Duration::from_secs(5), async {
+        loop {
+            match timeout(Duration::from_secs(2), ws.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    let msg: Value = serde_json::from_str(&text).unwrap_or_default();
+                    if msg["code"] == "BACKPRESSURE_CLOSE" {
+                        return true;
+                    }
+                }
+                Ok(Some(Ok(Message::Close(_)))) => return true,
+                Ok(None) => return true, // connection closed
+                _ => continue,
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        got_backpressure.is_ok(),
+        "WS connection should be closed due to backpressure"
+    );
+
+    gateway_handle.abort();
+    Ok(())
+}
+
 fn now_millis() -> i64 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     now.as_millis() as i64
+}
+
+// --- Graceful shutdown helpers and tests ---
+
+/// Spawns a gateway using `serve_with_shutdown` with a oneshot channel as the
+/// shutdown signal. Returns `(gateway_base, server_join_handle, shutdown_tx)`.
+/// Calling `shutdown_tx.send(())` triggers graceful shutdown.
+async fn spawn_gateway_with_shutdown(
+    backend_url: &str,
+    require_auth: bool,
+    configure: impl FnOnce(&mut ssma_rust::runtime::Config),
+) -> Result<(
+    String,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Sender<()>,
+    std::path::PathBuf,
+)> {
+    let mut config = ssma_rust::runtime::Config::from_env();
+    config.host = "127.0.0.1".to_string();
+    config.port = 0;
+    config.backend_url = backend_url.to_string();
+    config.require_auth_for_writes = require_auth;
+    config.intent_store_path = std::env::temp_dir().join(format!(
+        "ssma-rust-e2e-shutdown-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    configure(&mut config);
+
+    let intent_store_path = config.intent_store_path.clone();
+    let state = ssma_rust::gateway::build_state(config);
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let handle = tokio::spawn(async move {
+        let signal = async {
+            let _ = shutdown_rx.await;
+            Ok::<(), std::io::Error>(())
+        };
+        let _ = ssma_rust::gateway::serve_with_shutdown(listener, state, signal).await;
+    });
+
+    // Wait for the server to start accepting connections
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    Ok((format!("127.0.0.1:{}", addr.port()), handle, shutdown_tx, intent_store_path))
+}
+
+#[tokio::test]
+async fn shutdown_signal_triggers_graceful_shutdown() -> Result<()> {
+    let (backend_base, backend_handle) = spawn_toy_backend().await?;
+    let (gateway_base, gateway_handle, shutdown_tx, _) =
+        spawn_gateway_with_shutdown(&backend_base, false, |_| {}).await?;
+
+    // Verify server is up
+    let health = reqwest::get(format!("http://{}/health", gateway_base))
+        .await?
+        .json::<Value>()
+        .await?;
+    assert_eq!(health["status"], "ok");
+
+    // Trigger shutdown
+    shutdown_tx.send(()).expect("send shutdown signal");
+
+    // Server should complete within a reasonable time
+    let result = timeout(Duration::from_secs(5), gateway_handle).await;
+    assert!(result.is_ok(), "server should shut down within 5s");
+
+    backend_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_ws_connections_receive_close_frame_on_shutdown() -> Result<()> {
+    let (backend_base, backend_handle) = spawn_toy_backend().await?;
+    let (gateway_base, gateway_handle, shutdown_tx, _) =
+        spawn_gateway_with_shutdown(&backend_base, false, |_| {}).await?;
+
+    // Connect a WS client
+    let (mut ws, _) = connect_async(format!(
+        "ws://{}/optimistic/ws?role=leader&site=default&subprotocol=1.0.0",
+        gateway_base
+    ))
+    .await?;
+    let _ = ws_wait_for(&mut ws, "hello").await?;
+    let _ = ws_wait_for(&mut ws, "replay").await?;
+
+    // Trigger shutdown
+    shutdown_tx.send(()).expect("send shutdown signal");
+
+    // WS client should receive a close frame
+    let got_close = timeout(Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Close(_))) => return true,
+                Some(Ok(Message::Text(text))) => {
+                    // Might receive a few buffered messages before close
+                    let msg: Value = serde_json::from_str(&text).unwrap_or_default();
+                    if msg["type"] == "server.shutdown" {
+                        continue;
+                    }
+                }
+                Some(Err(_)) => return true, // connection closed with error
+                None => return true,         // stream ended
+                _ => continue,
+            }
+        }
+    })
+    .await;
+
+    assert!(got_close.is_ok(), "WS connection should close within 5s of shutdown signal");
+
+    gateway_handle.abort();
+    backend_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn intent_store_written_on_shutdown() -> Result<()> {
+    let (backend_base, backend_handle) = spawn_toy_backend().await?;
+    let (gateway_base, gateway_handle, shutdown_tx, intent_store_path) =
+        spawn_gateway_with_shutdown(&backend_base, false, |_| {}).await?;
+
+    // Send an intent via WS
+    let (mut ws, _) = connect_async(format!(
+        "ws://{}/optimistic/ws?role=leader&site=default&subprotocol=1.0.0",
+        gateway_base
+    ))
+    .await?;
+    let _ = ws_wait_for(&mut ws, "hello").await?;
+    let _ = ws_wait_for(&mut ws, "replay").await?;
+
+    ws.send(Message::Text(
+        json!({
+            "type": "intent.batch",
+            "intents": [{
+                "id": "i-shutdown-test",
+                "intent": "TODO_CREATE",
+                "payload": {"id":"todo-shutdown"},
+                "meta": {"clock": now_millis(), "channels": ["global"]}
+            }]
+        })
+        .to_string(),
+    ))
+    .await?;
+    let _ = ws_wait_for(&mut ws, "ack").await?;
+
+    // Trigger shutdown
+    shutdown_tx.send(()).expect("send shutdown signal");
+    let _ = timeout(Duration::from_secs(5), gateway_handle).await;
+
+    // Verify intent store file was written
+    assert!(intent_store_path.exists(), "intent store file should exist after shutdown");
+    let contents = std::fs::read_to_string(&intent_store_path)?;
+    let persisted: Value = serde_json::from_str(&contents)?;
+    assert_eq!(persisted["version"], 1);
+    let entries = persisted["entries"].as_array().expect("entries array");
+    assert!(
+        entries.iter().any(|e| e["id"] == "i-shutdown-test"),
+        "intent store should contain the test intent after shutdown"
+    );
+
+    // Cleanup
+    let _ = std::fs::remove_file(&intent_store_path);
+    backend_handle.abort();
+    Ok(())
 }

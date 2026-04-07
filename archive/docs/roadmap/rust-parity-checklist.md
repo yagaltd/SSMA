@@ -20,8 +20,4 @@ Track parity against JS gateway runtime.
 - [x] RTC signaling routes (`/rtc/sessions`, `/rtc/sessions/:id/signals`)
 - [x] Durable vs ephemeral split validated in Rust E2E (RTC stays out of replay)
 
-Pending JS parity:
-- [ ] `/media/*` routes
-- [ ] `/internal/assets/*` adapter fetch routes
-- [ ] RTC signaling routes
-- [ ] Anonymous guest asset ownership parity
+JS gateway archived. All surface ships in Rust only.

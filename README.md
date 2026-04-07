@@ -1,6 +1,6 @@
 # SSMA (Server-Side Microservices Architecture)
 
-SSMA is a backend-agnostic realtime gateway implemented in both JavaScript and Rust.
+SSMA is a backend-agnostic realtime gateway implemented in Rust.
 
 It sits between frontend clients and your business backend, and owns:
 - WebSocket and SSE transport
@@ -15,40 +15,25 @@ It sits between frontend clients and your business backend, and owns:
 SSMA does not replace your application backend.
 It provides the gateway contract and runtime behavior around it.
 
-## Runtimes
+## Runtime
 
-- `apps/ssma-js`: Node.js runtime
 - `apps/ssma-rust`: Rust runtime
 - `packages/ssma-protocol`: shared contracts and vectors
 
-Current parity state:
-- Rust is ahead for Session A gateway features:
-  - media asset routes
-  - backend-token-protected internal asset fetch
-  - anonymous guest asset ownership
-  - RTC signaling routes
-- JS still provides the baseline optimistic gateway/runtime and needs parity follow-up for the new media/RTC surface
+The JS gateway (`apps/ssma-js`) has been archived to `archive/ssma-js`.
 
 ## Core Contract
 
-The canonical sources of truth are:
-- [`docs/architecture/backend-interface.md`](docs/architecture/backend-interface.md)
-- [`docs/protocol/wire-protocol.md`](docs/protocol/wire-protocol.md)
-- [`docs/security/auth.md`](docs/security/auth.md)
-- [`docs/security/rbac.md`](docs/security/rbac.md)
+The canonical sources of truth are the **skills**:
 
-If code, tests, and docs diverge, align to the contract docs and update the rest.
+- [`skills/ssma-protocol/SKILL.md`](skills/ssma-protocol/SKILL.md) — wire protocol, message contracts
+- [`skills/ssma-security/SKILL.md`](skills/ssma-security/SKILL.md) — auth, RBAC, rate limits
+- [`skills/ssma-backend/SKILL.md`](skills/ssma-backend/SKILL.md) — backend adapter contract
+- [`skills/ssma-transport/SKILL.md`](skills/ssma-transport/SKILL.md) — HTTP, WS, SSE endpoints
+
+If code, tests, and skills diverge, align to the skill docs and update the rest.
 
 ## Quick Start
-
-From the repo root:
-
-```bash
-npm install
-npm run dev:js
-```
-
-For the Rust runtime:
 
 ```bash
 cd apps/ssma-rust
@@ -58,56 +43,47 @@ cargo run
 ## Common Commands
 
 ```bash
-npm run dev:js
-npm run start:js
-npm run test:js
-npm run test:conformance
-npm run run:e2e
-npm run test:rust
+cd apps/ssma-rust && cargo test -- --nocapture
 npm run validate:templates
 ```
 
-Targeted runs:
+Targeted test runs:
 
 ```bash
-npm --prefix apps/ssma-js exec -- vitest run tests/<file>.test.js
 cd apps/ssma-rust && cargo test --test <name> -- --nocapture
 ```
+
+## Skills
+
+Read before changing code:
+
+| Skill | Covers |
+|-------|--------|
+| [`ssma-overview`](skills/ssma-overview/SKILL.md) | Architecture, module layout, conventions |
+| [`ssma-protocol`](skills/ssma-protocol/SKILL.md) | Wire protocol, contracts, schema validation |
+| [`ssma-security`](skills/ssma-security/SKILL.md) | Auth, RBAC, rate limits, CORS |
+| [`ssma-transport`](skills/ssma-transport/SKILL.md) | HTTP endpoints, WS, SSE, admin APIs |
+| [`ssma-optimistic`](skills/ssma-optimistic/SKILL.md) | Intent store, replay, fanout, channels |
+| [`ssma-backend`](skills/ssma-backend/SKILL.md) | Backend adapter contract, media, events |
+| [`ssma-config`](skills/ssma-config/SKILL.md) | Env vars, deployment, operations |
+| [`ssma-testing`](skills/ssma-testing/SKILL.md) | How to write and run tests |
 
 ## Repository Map
 
 | Path | Purpose |
 | --- | --- |
-| `apps/ssma-js/src/app.js` | JS runtime composition root |
-| `apps/ssma-js/src/services/optimistic/SyncGateway.js` | JS WebSocket gateway |
-| `apps/ssma-js/src/services/optimistic/OptimisticEventHub.js` | JS SSE fanout |
-| `apps/ssma-js/src/backend/BackendHttpClient.js` | JS backend adapter client |
-| `apps/ssma-rust/src/gateway.rs` | Rust gateway transport and fanout |
+| `apps/ssma-rust/src/gateway/` | Rust gateway transport and fanout |
 | `apps/ssma-rust/src/backend.rs` | Rust backend adapter client |
-| `apps/ssma-rust/src/runtime.rs` | Rust config and intent store |
+| `apps/ssma-rust/src/config.rs` | Rust configuration |
+| `apps/ssma-rust/src/runtime.rs` | Rust intent store |
 | `packages/ssma-protocol/contracts` | JSON contracts |
 | `packages/ssma-protocol/vectors` | shared protocol vectors |
 | `templates/` | CLI scaffold manifests |
-| `docs/` | architecture, API, security, operations, testing |
+| `skills/` | AI-agent skills (read before changing code) |
 
-## Documentation
+## Gateway Surface
 
-Start here:
-- [`docs/index.md`](docs/index.md)
-- [`docs/README.md`](docs/README.md)
-
-Recommended reading:
-- [`docs/guides/SSMA-IN-A-NUTSHELL.md`](docs/guides/SSMA-IN-A-NUTSHELL.md)
-- [`docs/guides/SSMA-RUNTIME.md`](docs/guides/SSMA-RUNTIME.md)
-- [`docs/guides/SSMA-OPTIMISTIC-SYNC.md`](docs/guides/SSMA-OPTIMISTIC-SYNC.md)
-- [`docs/api/http-endpoints.md`](docs/api/http-endpoints.md)
-- [`docs/roadmap/rust-parity-checklist.md`](docs/roadmap/rust-parity-checklist.md)
-- [`docs/api/streaming.md`](docs/api/streaming.md)
-- [`docs/operations/config.md`](docs/operations/config.md)
-
-## Session A Gateway Surface
-
-Rust runtime currently exposes these additional gateway routes:
+The Rust runtime exposes:
 
 - `POST /media/assets`
 - `GET /media/assets/:assetId`
@@ -131,7 +107,6 @@ Important behavior:
 ## Templates
 
 Available template manifests:
-- `templates/js-gateway/template.manifest.json`
 - `templates/rust-gateway/template.manifest.json`
 
 Validate templates with:
@@ -139,18 +114,6 @@ Validate templates with:
 ```bash
 npm run validate:templates
 ```
-
-## Ecosystem Notes
-
-Current ecosystem direction:
-- backend starter support is good as an optional addon, not SSMA core
-- Tauri support should start as an integration/template path
-- a Tauri-specific transport/runtime should not be added until the architecture explicitly commits to it
-
-See:
-- [`docs/roadmap/rust-parity-checklist.md`](docs/roadmap/rust-parity-checklist.md)
-- [`ssma_backend_starter.md`](ssma_backend_starter.md)
-- [`ssma_tauri.md`](ssma_tauri.md)
 
 ## Agent Guidance
 

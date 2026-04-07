@@ -75,6 +75,13 @@ pub(crate) async fn sse_events(
         loop {
             match rx.recv().await {
                 Ok(event) => {
+                    // Graceful shutdown: yield final event and close stream
+                    if event.get("type").and_then(|v| v.as_str()) == Some("server.shutdown") {
+                        yield Ok(Event::default()
+                            .event("server.shutdown")
+                            .data(event.to_string()));
+                        break;
+                    }
                     let event_site = event.get("site").and_then(|v| v.as_str()).unwrap_or("default");
                     if event_site != site {
                         continue;

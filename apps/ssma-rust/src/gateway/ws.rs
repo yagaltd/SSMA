@@ -1,9 +1,9 @@
 use super::{
     broadcast_app_event, can_access_channel, consume_channel_rate_limit, consume_global_rate_limit,
-    emit_server_event, extract_event_channels, normalize_status,
+    emit_server_event, extract_event_channels, normalize_intent_meta, normalize_status,
     register_channel_subscription, resolve_actor_from_headers, store_entries_for_channel_after,
     subprotocol_major_match, teardown_connection_state, unregister_channel_subscription,
-    AppState, ConnectionContext, WsQuery,
+    AppState, ConnectionContext, ConnectionUserSummary, WsQuery,
 };
 use crate::backend::{BackendContext, BackendUser};
 use crate::runtime::IntentRecord;
@@ -15,8 +15,23 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use tokio::sync::mpsc;
 use uuid::Uuid;
+
+#[derive(Debug)]
+enum OutboundFrame {
+    Text(String),
+    Close(Option<axum::extract::ws::CloseFrame<'static>>),
+}
+
+#[derive(Clone)]
+struct OutboundState {
+    tx: mpsc::UnboundedSender<OutboundFrame>,
+    queued_bytes: Arc<AtomicUsize>,
+    max_buffered_bytes: usize,
+    terminal_sent: Arc<AtomicBool>,
+}
 
 pub(crate) async fn ws_upgrade(
     ws: WebSocketUpgrade,
@@ -58,25 +73,48 @@ async fn ws_session(socket: WebSocket, query: WsQuery, headers: HeaderMap, state
 
     let (mut sender, mut receiver) = socket.split();
     let mut event_rx = state.events.subscribe();
-    let max_pending_messages = (state.config.ws_max_buffered_bytes / 1024).max(1) as usize;
+    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let outbound = OutboundState {
+        tx: outbound_tx,
+        queued_bytes: Arc::new(AtomicUsize::new(0)),
+        max_buffered_bytes: state.config.ws_max_buffered_bytes as usize,
+        terminal_sent: Arc::new(AtomicBool::new(false)),
+    };
+    let queued_bytes = outbound.queued_bytes.clone();
+    let writer = tokio::spawn(async move {
+        while let Some(frame) = outbound_rx.recv().await {
+            match frame {
+                OutboundFrame::Text(text) => {
+                    let size = text.len();
+                    if sender.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                    queued_bytes.fetch_sub(size, Ordering::Relaxed);
+                }
+                OutboundFrame::Close(frame) => {
+                    let _ = sender.send(Message::Close(frame)).await;
+                    break;
+                }
+            }
+        }
+    });
 
     let client_subprotocol = query
         .subprotocol
         .clone()
         .unwrap_or_else(|| state.config.subprotocol.clone());
     if !subprotocol_major_match(&state.config.subprotocol, &client_subprotocol) {
-        let _ = sender
-            .send(Message::Text(
-                json!({
-                    "type": "error",
-                    "code": "SUBPROTOCOL_MISMATCH",
-                    "expected": state.config.subprotocol
-                })
-                .to_string(),
-            ))
-            .await;
-        let _ = sender.send(Message::Close(None)).await;
+        let _ = send_json(
+            &outbound,
+            json!({
+                "type": "error",
+                "code": "SUBPROTOCOL_MISMATCH",
+                "expected": state.config.subprotocol
+            }),
+        );
+        send_close(&outbound, None);
         teardown_connection_state(&state, &connection_id);
+        let _ = writer.await;
         return;
     }
 
@@ -88,16 +126,23 @@ async fn ws_session(socket: WebSocket, query: WsQuery, headers: HeaderMap, state
         "connectionId": connection_id,
         "serverTime": crate::runtime::now_millis(),
     });
-    let _ = sender.send(Message::Text(hello.to_string())).await;
+    if !send_json(&outbound, hello) {
+        teardown_connection_state(&state, &connection_id);
+        let _ = writer.await;
+        return;
+    }
 
     let cursor = query.cursor.unwrap_or(0);
     let replay = state.store.entries_after(cursor, 500);
     let replay_cursor = replay.last().map(|entry| entry.log_seq).unwrap_or(cursor);
-    let _ = sender
-        .send(Message::Text(
-            json!({ "type": "replay", "intents": replay, "cursor": replay_cursor }).to_string(),
-        ))
-        .await;
+    if !send_json(
+        &outbound,
+        json!({ "type": "replay", "intents": replay, "cursor": replay_cursor }),
+    ) {
+        teardown_connection_state(&state, &connection_id);
+        let _ = writer.await;
+        return;
+    }
 
     loop {
         tokio::select! {
@@ -118,84 +163,88 @@ async fn ws_session(socket: WebSocket, query: WsQuery, headers: HeaderMap, state
                 );
                 if !globally_allowed {
                     state.metrics.rate_limit_hits.fetch_add(1, Ordering::Relaxed);
-                    let _ = sender
-                        .send(Message::Text(
-                            json!({ "type": "error", "code": "RATE_LIMITED", "retryAfterMs": state.config.global_rate_window_ms }).to_string(),
-                        ))
-                        .await;
+                    let _ = send_json(
+                        &outbound,
+                        json!({ "type": "error", "code": "RATE_LIMITED", "retryAfterMs": state.config.global_rate_window_ms }),
+                    );
                     continue;
                 }
 
                 let payload = match serde_json::from_str::<Value>(&text) {
                     Ok(v) => v,
                     Err(_) => {
-                        let _ = sender
-                            .send(Message::Text(json!({ "type": "error", "code": "INVALID_JSON" }).to_string()))
-                            .await;
+                        let _ = send_json(&outbound, json!({ "type": "error", "code": "INVALID_JSON" }));
                         continue;
                     }
                 };
 
                 if let Err(details) = crate::protocol::validate_inbound(&payload) {
-                    let _ = sender
-                        .send(Message::Text(
-                            json!({ "type": "error", "code": "INVALID_CONTRACT", "details": details }).to_string(),
-                        ))
-                        .await;
+                    let _ = send_json(
+                        &outbound,
+                        json!({ "type": "error", "code": "INVALID_CONTRACT", "details": details }),
+                    );
                     continue;
                 }
 
                 let msg_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or_default();
                 match msg_type {
                     "ping" => {
-                        let _ = sender
-                            .send(Message::Text(json!({ "type": "pong", "ts": crate::runtime::now_millis() }).to_string()))
-                            .await;
+                        if !send_json(&outbound, json!({ "type": "pong", "ts": crate::runtime::now_millis() })) {
+                            break;
+                        }
                     }
                     "intent.batch" => {
-                        handle_intent_batch(&mut sender, &state, &context, payload).await;
+                        if !handle_intent_batch(&outbound, &state, &context, payload).await {
+                            break;
+                        }
                     }
                     "channel.subscribe" => {
-                        handle_channel_subscribe(&mut sender, &state, &context, payload).await;
+                        if !handle_channel_subscribe(&outbound, &state, &context, payload).await {
+                            break;
+                        }
                     }
                     "channel.unsubscribe" => {
-                        handle_channel_unsubscribe(&mut sender, &state, &context, payload).await;
+                        if !handle_channel_unsubscribe(&outbound, &state, &context, payload).await {
+                            break;
+                        }
                     }
                     "channel.resync" => {
-                        handle_channel_resync(&mut sender, &state, &context, payload).await;
+                        if !handle_channel_resync(&outbound, &state, &context, payload).await {
+                            break;
+                        }
                     }
                     "channel.command" => {
-                        handle_channel_command(&mut sender, &state, &context, payload).await;
+                        if !handle_channel_command(&outbound, &state, &context, payload).await {
+                            break;
+                        }
                     }
                     _ => {
-                        let _ = sender
-                            .send(Message::Text(json!({ "type": "error", "code": "UNKNOWN_TYPE" }).to_string()))
-                            .await;
+                        if !send_json(&outbound, json!({ "type": "error", "code": "UNKNOWN_TYPE" })) {
+                            break;
+                        }
                     }
                 }
             }
             event = event_rx.recv() => {
                 match event {
                     Ok(event) => {
-                        for frame in build_frames_for_connection(&state, &context, &event) {
-                            let _ = sender.send(Message::Text(frame.to_string())).await;
+                        // Graceful shutdown: send close frame and exit
+                        if event.get("type").and_then(|v| v.as_str()) == Some("server.shutdown") {
+                            send_close(
+                                &outbound,
+                                Some(axum::extract::ws::CloseFrame {
+                                    code: 1001u16,
+                                    reason: "server shutdown".into(),
+                                }),
+                            );
+                            break;
                         }
-                        // Backpressure check: count how many messages are buffered
-                        let mut pending = 0;
-                        while let Ok(event) = event_rx.try_recv() {
-                            pending += build_frames_for_connection(&state, &context, &event).len();
-                            if pending > max_pending_messages {
+                        for frame in build_frames_for_connection(&state, &context, &event) {
+                            if !send_json(&outbound, frame) {
                                 break;
                             }
                         }
-                        if pending > max_pending_messages {
-                            let _ = sender.send(Message::Text(
-                                json!({ "type": "error", "code": "BACKPRESSURE_CLOSE" }).to_string(),
-                            )).await;
-                            let _ = sender.send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                                code: 1008u16,
-                                reason: "backpressure".into(),
-                            }))).await;
+                        if outbound.terminal_sent.load(Ordering::Relaxed) {
                             break;
                         }
                     }
@@ -211,34 +260,28 @@ async fn ws_session(socket: WebSocket, query: WsQuery, headers: HeaderMap, state
     }
 
     teardown_connection_state(&state, &connection_id);
+    let _ = writer.await;
 }
 
 async fn handle_intent_batch(
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    outbound: &OutboundState,
     state: &Arc<AppState>,
     context: &ConnectionContext,
     payload: Value,
-) {
+) -> bool {
     if context.transport_role != "leader" {
-        let _ = sender
-            .send(Message::Text(
-                json!({ "type": "error", "code": "NOT_LEADER" }).to_string(),
-            ))
-            .await;
-        return;
+        return send_json(outbound, json!({ "type": "error", "code": "NOT_LEADER" }));
     }
     if state.config.require_auth_for_writes && context.user_id.is_none() {
-        let _ = sender
-            .send(Message::Text(
-                json!({ "type": "error", "code": "UNAUTHORIZED" }).to_string(),
-            ))
-            .await;
+        if !send_json(outbound, json!({ "type": "error", "code": "UNAUTHORIZED" })) {
+            return false;
+        }
         emit_server_event(
             state,
             "INTENT_REJECTED",
             json!({"reason":"UNAUTHORIZED", "site": context.site}),
         );
-        return;
+        return true;
     }
 
     let intents = payload
@@ -262,12 +305,14 @@ async fn handle_intent_batch(
                 .unwrap_or("UNKNOWN")
                 .to_string(),
             payload: intent.get("payload").cloned().unwrap_or(Value::Null),
-            meta: intent.get("meta").cloned().unwrap_or_else(|| json!({})),
+            meta: normalize_intent_meta(&intent.get("meta").cloned().unwrap_or_else(|| json!({}))),
             inserted_at: now,
             log_seq: 0,
             site: context.site.clone(),
             status: "acked".to_string(),
             connection_id: Some(context.connection_id.clone()),
+            actor_key: context.actor_key.clone(),
+            user_id: context.user_id.clone(),
             backend: None,
         })
         .collect::<Vec<_>>();
@@ -388,11 +433,9 @@ async fn handle_intent_batch(
         })
         .collect::<Vec<_>>();
 
-    let _ = sender
-        .send(Message::Text(
-            json!({ "type": "ack", "intents": ack_intents }).to_string(),
-        ))
-        .await;
+    if !send_json(outbound, json!({ "type": "ack", "intents": ack_intents })) {
+        return false;
+    }
 
     let invalidate_intents = outcome
         .all
@@ -427,14 +470,16 @@ async fn handle_intent_batch(
             }),
         );
     }
+
+    true
 }
 
 async fn handle_channel_subscribe(
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    outbound: &OutboundState,
     state: &Arc<AppState>,
     context: &ConnectionContext,
     payload: Value,
-) {
+) -> bool {
     let channel = payload
         .get("channel")
         .and_then(|v| v.as_str())
@@ -447,17 +492,16 @@ async fn handle_channel_subscribe(
             "CHANNEL_ACCESS_DENIED",
             json!({"channel": channel, "site": context.site, "role": context.auth_role}),
         );
-        let _ = sender
-            .send(Message::Text(
-                json!({ "type": "channel.ack", "status": "error", "channel": channel, "params": params.clone(), "code": "ACCESS_DENIED" }).to_string(),
-            ))
-            .await;
-        let _ = sender
-            .send(Message::Text(
-                json!({ "type": "channel.close", "status": "error", "channel": channel, "params": params.clone(), "code": "ACCESS_DENIED" }).to_string(),
-            ))
-            .await;
-        return;
+        if !send_json(
+            outbound,
+            json!({ "type": "channel.ack", "status": "error", "channel": channel, "params": params.clone(), "code": "ACCESS_DENIED" }),
+        ) {
+            return false;
+        }
+        return send_json(
+            outbound,
+            json!({ "type": "channel.close", "status": "error", "channel": channel, "params": params.clone(), "code": "ACCESS_DENIED" }),
+        );
     }
 
     let key = format!("{}:{}:{}", context.site, context.connection_id, channel);
@@ -472,25 +516,30 @@ async fn handle_channel_subscribe(
             .metrics
             .rate_limit_hits
             .fetch_add(1, Ordering::Relaxed);
-        let _ = sender
-            .send(Message::Text(
-                json!({
-                    "type": "channel.ack",
-                    "status": "error",
-                    "channel": channel,
-                    "code": "RATE_LIMITED",
-                    "retryAfterMs": state.config.channel_subscribe_window_ms,
-                })
-                .to_string(),
-            ))
-            .await;
-        return;
+        return send_json(
+            outbound,
+            json!({
+                "type": "channel.ack",
+                "status": "error",
+                "channel": channel,
+                "code": "RATE_LIMITED",
+                "retryAfterMs": state.config.channel_subscribe_window_ms,
+            }),
+        );
     }
 
     register_channel_subscription(
         state,
         &context.connection_id,
         &context.site,
+        &context.transport_role,
+        context
+            .user_id
+            .as_ref()
+            .map(|user_id| ConnectionUserSummary {
+                id: user_id.clone(),
+                role: context.auth_role.clone(),
+            }),
         channel,
         params.clone(),
     );
@@ -501,11 +550,12 @@ async fn handle_channel_subscribe(
         json!({"channel": channel, "site": context.site, "connectionId": context.connection_id}),
     );
 
-    let _ = sender
-            .send(Message::Text(
-                json!({ "type": "channel.ack", "status": "ok", "channel": channel, "params": params.clone() }).to_string(),
-            ))
-            .await;
+    if !send_json(
+        outbound,
+        json!({ "type": "channel.ack", "status": "ok", "channel": channel, "params": params.clone() }),
+    ) {
+        return false;
+    }
 
     let mut snapshot_cursor = state.store.latest_cursor();
     let intents =
@@ -557,26 +607,24 @@ async fn handle_channel_subscribe(
                 .collect()
         };
 
-    let _ = sender
-        .send(Message::Text(
-            json!({
-                "type": "channel.snapshot",
-                "channel": channel,
-                "params": params.clone(),
-                "intents": intents,
-                "cursor": snapshot_cursor,
-            })
-            .to_string(),
-        ))
-        .await;
+    send_json(
+        outbound,
+        json!({
+            "type": "channel.snapshot",
+            "channel": channel,
+            "params": params.clone(),
+            "intents": intents,
+            "cursor": snapshot_cursor,
+        }),
+    )
 }
 
 async fn handle_channel_unsubscribe(
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    outbound: &OutboundState,
     state: &Arc<AppState>,
     context: &ConnectionContext,
     payload: Value,
-) {
+) -> bool {
     let channel = payload
         .get("channel")
         .and_then(|v| v.as_str())
@@ -584,25 +632,24 @@ async fn handle_channel_unsubscribe(
     let params = payload.get("params").cloned().unwrap_or_else(|| json!({}));
     unregister_channel_subscription(state, &context.connection_id, channel, &params);
 
-    let _ = sender
-        .send(Message::Text(
-            json!({ "type": "channel.unsubscribed", "status": "ok", "channel": channel })
-                .to_string(),
-        ))
-        .await;
-    let _ = sender
-        .send(Message::Text(
-            json!({ "type": "channel.close", "status": "ok", "channel": channel, "params": params, "reason": "client-unsubscribe" }).to_string(),
-        ))
-        .await;
+    if !send_json(
+        outbound,
+        json!({ "type": "channel.unsubscribed", "status": "ok", "channel": channel }),
+    ) {
+        return false;
+    }
+    send_json(
+        outbound,
+        json!({ "type": "channel.close", "status": "ok", "channel": channel, "params": params, "reason": "client-unsubscribe" }),
+    )
 }
 
 async fn handle_channel_resync(
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    outbound: &OutboundState,
     state: &Arc<AppState>,
     context: &ConnectionContext,
     payload: Value,
-) {
+) -> bool {
     let channel = payload
         .get("channel")
         .and_then(|v| v.as_str())
@@ -614,12 +661,10 @@ async fn handle_channel_resync(
             "CHANNEL_ACCESS_DENIED",
             json!({"channel": channel, "site": context.site, "role": context.auth_role}),
         );
-        let _ = sender
-            .send(Message::Text(
-                json!({ "type": "channel.close", "status": "error", "channel": channel, "params": params, "code": "ACCESS_DENIED" }).to_string(),
-            ))
-            .await;
-        return;
+        return send_json(
+            outbound,
+            json!({ "type": "channel.close", "status": "error", "channel": channel, "params": params, "code": "ACCESS_DENIED" }),
+        );
     }
     let cursor = payload.get("cursor").and_then(|v| v.as_u64()).unwrap_or(0);
     let (intents, next) =
@@ -640,19 +685,18 @@ async fn handle_channel_resync(
                 next,
             )
         };
-    let _ = sender
-        .send(Message::Text(
-            json!({ "type": "channel.replay", "status": "ok", "channel": channel, "params": params, "cursor": next, "intents": intents }).to_string(),
-        ))
-        .await;
+    send_json(
+        outbound,
+        json!({ "type": "channel.replay", "status": "ok", "channel": channel, "params": params, "cursor": next, "intents": intents }),
+    )
 }
 
 async fn handle_channel_command(
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    outbound: &OutboundState,
     state: &Arc<AppState>,
     context: &ConnectionContext,
     payload: Value,
-) {
+) -> bool {
     let channel = payload
         .get("channel")
         .and_then(|v| v.as_str())
@@ -664,22 +708,19 @@ async fn handle_channel_command(
             "CHANNEL_ACCESS_DENIED",
             json!({"channel": channel, "site": context.site, "role": context.auth_role}),
         );
-        let _ = sender
-            .send(Message::Text(
-                json!({ "type": "channel.close", "status": "error", "channel": channel, "params": params, "code": "ACCESS_DENIED" }).to_string(),
-            ))
-            .await;
-        return;
+        return send_json(
+            outbound,
+            json!({ "type": "channel.close", "status": "error", "channel": channel, "params": params, "code": "ACCESS_DENIED" }),
+        );
     }
     let command = payload
         .get("command")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
-    let _ = sender
-        .send(Message::Text(
-            json!({ "type": "channel.command", "status": "ok", "channel": channel, "params": params, "command": command }).to_string(),
-        ))
-        .await;
+    send_json(
+        outbound,
+        json!({ "type": "channel.command", "status": "ok", "channel": channel, "params": params, "command": command }),
+    )
 }
 
 fn build_frames_for_connection(
@@ -760,4 +801,53 @@ fn build_frames_for_connection(
             })
         })
         .collect()
+}
+
+fn send_json(outbound: &OutboundState, value: Value) -> bool {
+    send_text(outbound, value.to_string())
+}
+
+fn send_text(outbound: &OutboundState, text: String) -> bool {
+    if outbound.terminal_sent.load(Ordering::Relaxed) {
+        return false;
+    }
+    let size = text.len();
+    let current = outbound.queued_bytes.load(Ordering::Relaxed);
+    if current.saturating_add(size) > outbound.max_buffered_bytes {
+        trigger_backpressure_close(outbound);
+        return false;
+    }
+    outbound.queued_bytes.fetch_add(size, Ordering::Relaxed);
+    if outbound.tx.send(OutboundFrame::Text(text)).is_err() {
+        outbound.queued_bytes.fetch_sub(size, Ordering::Relaxed);
+        return false;
+    }
+    true
+}
+
+fn trigger_backpressure_close(outbound: &OutboundState) {
+    if outbound.terminal_sent.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let _ = outbound
+        .tx
+        .send(OutboundFrame::Text(
+            json!({ "type": "error", "code": "BACKPRESSURE_CLOSE" }).to_string(),
+        ));
+    let _ = outbound.tx.send(OutboundFrame::Close(Some(
+        axum::extract::ws::CloseFrame {
+            code: 1008u16,
+            reason: "backpressure".into(),
+        },
+    )));
+}
+
+fn send_close(
+    outbound: &OutboundState,
+    frame: Option<axum::extract::ws::CloseFrame<'static>>,
+) {
+    if outbound.terminal_sent.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let _ = outbound.tx.send(OutboundFrame::Close(frame));
 }

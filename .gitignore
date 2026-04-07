@@ -1,7 +1,5 @@
 node_modules/
-apps/ssma-js/node_modules/
 apps/ssma-rust/target/
-apps/ssma-js/logs/
 .old/
 
 .env
