@@ -6,7 +6,7 @@ use tokio::time::{timeout, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
-async fn spawn_gateway(mut config: ssma_rust::runtime::Config) -> Result<(String, tokio::task::JoinHandle<()>)> {
+async fn spawn_gateway(mut config: ssma_rust::config::Config) -> Result<(String, tokio::task::JoinHandle<()>)> {
     config.host = "127.0.0.1".to_string();
     config.port = 0;
     config.backend_url = "".to_string();
@@ -48,7 +48,7 @@ async fn ws_wait_for(
 
 #[tokio::test]
 async fn conformance_vectors_replayed_against_runtime() -> Result<()> {
-    let (base, handle) = spawn_gateway(ssma_rust::runtime::Config::from_env()).await?;
+    let (base, handle) = spawn_gateway(ssma_rust::config::Config::from_env()).await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // ws_handshake
@@ -96,7 +96,7 @@ async fn conformance_vectors_replayed_against_runtime() -> Result<()> {
 
     // unauthorized_ws_reject using auth-required runtime
     handle.abort();
-    let mut auth_cfg = ssma_rust::runtime::Config::from_env();
+    let mut auth_cfg = ssma_rust::config::Config::from_env();
     auth_cfg.require_auth_for_writes = true;
     let (base2, handle2) = spawn_gateway(auth_cfg).await?;
     tokio::time::sleep(Duration::from_millis(200)).await;

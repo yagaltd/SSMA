@@ -1,5 +1,6 @@
 use crate::gateway::{
-    api_error, connection_ip_from_headers, consume_global_rate_limit, ApiResult, AppState,
+    api_error, collect_gateway_metrics, connection_ip_from_headers, consume_global_rate_limit,
+    ApiResult, AppState,
 };
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -12,8 +13,53 @@ use std::sync::Arc;
 
 #[derive(Deserialize)]
 pub(crate) struct LogsBatchRequest {
-    logs: Vec<Value>,
+    logs: Option<Vec<Value>>,
     site: Option<String>,
+    #[serde(rename = "batchId")]
+    batch_id: Option<String>,
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    #[serde(rename = "userId")]
+    user_id: Option<String>,
+    source: Option<String>,
+    meta: Option<Value>,
+    entries: Option<Vec<Value>>,
+}
+
+impl LogsBatchRequest {
+    fn forwarded_payload(self, gateway_metrics: Value) -> Value {
+        let gateway = json!({
+            "timestamp": crate::runtime::now_millis(),
+            "metrics": gateway_metrics,
+        });
+
+        if let Some(entries) = self.entries {
+            return json!({
+                "batchId": self.batch_id,
+                "sessionId": self.session_id,
+                "userId": self.user_id,
+                "source": self.source,
+                "meta": self.meta.unwrap_or_else(|| json!({})),
+                "entries": entries,
+                "site": self.site.unwrap_or_default(),
+                "gateway": gateway,
+            });
+        }
+
+        json!({
+            "logs": self.logs.unwrap_or_default(),
+            "site": self.site.unwrap_or_default(),
+            "gateway": gateway,
+        })
+    }
+
+    fn entry_count(&self) -> usize {
+        self.entries
+            .as_ref()
+            .map(|entries| entries.len())
+            .or_else(|| self.logs.as_ref().map(|logs| logs.len()))
+            .unwrap_or(0)
+    }
 }
 
 pub(crate) async fn logs_batch(
@@ -30,16 +76,12 @@ pub(crate) async fn logs_batch(
         return Ok(Json(json!({ "status": "disabled" })));
     }
 
-    let payload = json!({
-        "logs": body.logs,
-        "site": body.site.unwrap_or_default(),
-        "gatewayMeta": {
-            "timestamp": crate::runtime::now_millis(),
-        }
-    });
+    let gateway_metrics = collect_gateway_metrics(&state);
+    let count = body.entry_count();
+    let payload = body.forwarded_payload(gateway_metrics);
 
-    let count = body.logs.len();
-    let result = reqwest::Client::new()
+    let result = state
+        .log_client
         .post(&state.config.log_relay_url)
         .json(&payload)
         .timeout(std::time::Duration::from_millis(state.config.backend_timeout_ms))

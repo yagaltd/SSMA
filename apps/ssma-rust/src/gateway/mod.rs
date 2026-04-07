@@ -51,6 +51,7 @@ pub struct AppState {
     pub(crate) channel_registry: Arc<Mutex<HashMap<String, ConnectionChannels>>>,
     pub(crate) metrics: Arc<MetricsState>,
     pub(crate) webrtc: crate::modules::webrtc::WebRtcManager,
+    pub(crate) log_client: reqwest::Client,
 }
 
 #[derive(Debug, Clone)]
@@ -186,11 +187,21 @@ pub(crate) struct MetricsState {
 pub(crate) struct ChannelSubscription {
     pub(crate) channel: String,
     pub(crate) params: Value,
+    pub(crate) subscribed_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConnectionUserSummary {
+    pub(crate) id: String,
+    pub(crate) role: String,
 }
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ConnectionChannels {
     pub(crate) site: String,
+    pub(crate) connection_role: String,
+    pub(crate) user: Option<ConnectionUserSummary>,
     pub(crate) subscriptions: HashMap<String, ChannelSubscription>,
 }
 
@@ -310,6 +321,7 @@ pub fn build_state(config: Config) -> Arc<AppState> {
         channel_registry: Arc::new(Mutex::new(HashMap::new())),
         metrics: Arc::new(MetricsState::default()),
         webrtc: crate::modules::webrtc::WebRtcManager::new(),
+        log_client: reqwest::Client::new(),
     })
 }
 
@@ -384,14 +396,43 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let state = build_state(config.clone());
     let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port)).await?;
     tracing::info!(addr = %listener.local_addr()?, "ssma-rust listening");
-    serve(listener, state).await
+
+    serve_with_shutdown(listener, state, tokio::signal::ctrl_c()).await
 }
 
-pub async fn serve(
+pub async fn serve_with_shutdown(
     listener: tokio::net::TcpListener,
     state: Arc<AppState>,
+    signal: impl std::future::Future<Output = std::io::Result<()>> + Send + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    axum::serve(listener, app(state)).await?;
+    let app = app(state.clone());
+
+    // Wrap the signal future to broadcast shutdown to WS/SSE clients
+    let state_for_signal = state.clone();
+    let shutdown_trigger = async move {
+        let _ = signal.await;
+        tracing::info!("ssma-rust shutdown signal received, draining connections");
+        let _ = state_for_signal.events.send(json!({
+            "type": "server.shutdown",
+            "reason": "graceful",
+            "message": "Server is shutting down"
+        }));
+    };
+
+    // with_graceful_shutdown stops accepting new connections once the signal fires.
+    // The broadcast `server.shutdown` event tells WS/SSE loops to close,
+    // which allows the server to finish.
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_trigger)
+        .await?;
+
+    // After server finishes, persist intent store
+    if let Err(e) = state.store.flush_to_disk() {
+        tracing::error!(%e, "ssma-rust failed to persist intent store");
+    } else {
+        tracing::info!("ssma-rust intent store persisted");
+    }
+
     Ok(())
 }
 
@@ -427,6 +468,22 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Json<Value> {
         },
         "serverEvents": state.metrics.server_events.lock().expect("server events lock").clone(),
     }))
+}
+
+pub(crate) fn collect_gateway_metrics(state: &AppState) -> Value {
+    json!({
+        "active": {
+            "ws": state.metrics.ws_active.load(Ordering::Relaxed),
+            "sse": state.metrics.sse_active.load(Ordering::Relaxed),
+        },
+        "totals": {
+            "wsConnections": state.metrics.ws_total.load(Ordering::Relaxed),
+            "sseConnections": state.metrics.sse_total.load(Ordering::Relaxed),
+            "broadcasts": state.metrics.broadcast_count.load(Ordering::Relaxed),
+            "rateLimitHits": state.metrics.rate_limit_hits.load(Ordering::Relaxed),
+        },
+        "serverEvents": state.metrics.server_events.lock().expect("server events lock").clone(),
+    })
 }
 
 async fn public_query(
@@ -553,10 +610,12 @@ pub(crate) fn resolve_actor_from_headers(
 
 pub(crate) fn resolve_user_from_headers(headers: &HeaderMap, config: &Config) -> Option<ResolvedUser> {
     let token = cookie_value(headers, &config.auth_cookie_name)?;
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_aud = false;
     let claims = decode::<AuthClaims>(
         &token,
         &DecodingKey::from_secret(config.auth_jwt_secret.as_bytes()),
-        &Validation::new(Algorithm::HS256),
+        &validation,
     )
     .ok()?
     .claims;
@@ -765,6 +824,102 @@ pub(crate) fn stable_value_string(value: &Value) -> String {
     }
 }
 
+pub(crate) fn reason_list(meta: &Value) -> Vec<String> {
+    meta.get("reasons")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn set_reason_list(meta: &mut Value, reasons: &[String]) {
+    if !meta.is_object() {
+        *meta = json!({});
+    }
+    if let Some(object) = meta.as_object_mut() {
+        object.insert(
+            "reasons".to_string(),
+            Value::Array(
+                reasons
+                    .iter()
+                    .map(|reason| Value::String(reason.clone()))
+                    .collect(),
+            ),
+        );
+    }
+}
+
+pub(crate) fn ensure_reason(meta: &mut Value, reason: &str) {
+    let mut reasons = reason_list(meta);
+    if !reasons.iter().any(|value| value == reason) {
+        reasons.push(reason.to_string());
+    }
+    set_reason_list(meta, &reasons);
+}
+
+pub(crate) fn remove_reason(meta: &mut Value, reason: &str) {
+    let mut reasons = reason_list(meta);
+    reasons.retain(|value| value != reason);
+    set_reason_list(meta, &reasons);
+}
+
+pub(crate) fn normalize_intent_meta(meta: &Value) -> Value {
+    let mut normalized = if meta.is_object() {
+        meta.clone()
+    } else {
+        json!({})
+    };
+
+    let channels = normalized
+        .get("channels")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| vec!["global".to_string()]);
+
+    let mut reasons = reason_list(&normalized);
+    if !reasons.iter().any(|value| value == "pending") {
+        reasons.push("pending".to_string());
+    }
+    if !reasons.iter().any(|value| value == "replay") {
+        reasons.push("replay".to_string());
+    }
+    for channel in channels {
+        let reason = format!("channel:{}", channel);
+        if !reasons.iter().any(|value| value == &reason) {
+            reasons.push(reason);
+        }
+    }
+    set_reason_list(&mut normalized, &reasons);
+    normalized
+}
+
+pub(crate) fn consume_actor_rate_limit(
+    state: &Arc<AppState>,
+    bucket_name: &str,
+    actor_key: &str,
+    max: u32,
+    window_ms: i64,
+) -> bool {
+    consume_global_rate_limit(
+        state,
+        format!("{}:{}", bucket_name, actor_key),
+        max,
+        window_ms,
+    )
+}
+
 pub(crate) fn ensure_backend_token(headers: &HeaderMap, config: &Config) -> ApiResult<()> {
     if config.backend_internal_token.is_empty() {
         return Ok(());
@@ -917,6 +1072,8 @@ pub(crate) fn register_channel_subscription(
     state: &Arc<AppState>,
     connection_id: &str,
     site: &str,
+    connection_role: &str,
+    user: Option<ConnectionUserSummary>,
     channel: &str,
     params: Value,
 ) {
@@ -926,12 +1083,15 @@ pub(crate) fn register_channel_subscription(
         .expect("channel registry lock");
     let row = registry.entry(connection_id.to_string()).or_default();
     row.site = site.to_string();
+    row.connection_role = connection_role.to_string();
+    row.user = user;
     let sub_key = subscription_key(channel, &params);
     row.subscriptions.insert(
         sub_key,
         ChannelSubscription {
             channel: channel.to_string(),
             params,
+            subscribed_at: now_millis(),
         },
     );
 }
@@ -951,5 +1111,75 @@ pub(crate) fn unregister_channel_subscription(
         if row.subscriptions.is_empty() {
             registry.remove(connection_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_rank_ordering() {
+        assert!(role_rank("guest") < role_rank("user"));
+        assert!(role_rank("user") < role_rank("staff"));
+        assert!(role_rank("staff") < role_rank("admin"));
+        assert!(role_rank("admin") < role_rank("system"));
+    }
+
+    #[test]
+    fn role_rank_unknown_defaults_to_zero() {
+        assert_eq!(role_rank("unknown"), 0);
+        assert_eq!(role_rank(""), 0);
+        assert_eq!(role_rank("superadmin"), 0);
+    }
+
+    #[test]
+    fn normalize_status_known_values() {
+        assert_eq!(normalize_status(Some("acked")), "acked");
+        assert_eq!(normalize_status(Some("rejected")), "rejected");
+        assert_eq!(normalize_status(Some("conflict")), "conflict");
+        assert_eq!(normalize_status(Some("failed")), "failed");
+    }
+
+    #[test]
+    fn normalize_status_defaults_to_failed() {
+        assert_eq!(normalize_status(None), "failed");
+        assert_eq!(normalize_status(Some("")), "failed");
+        assert_eq!(normalize_status(Some("unknown")), "failed");
+    }
+
+    #[test]
+    fn subprotocol_major_match_exact() {
+        assert!(subprotocol_major_match("1.0.0", "1.2.3"));
+        assert!(subprotocol_major_match("1.0.0", "1.0.0"));
+    }
+
+    #[test]
+    fn subprotocol_major_match_rejects_mismatch() {
+        assert!(!subprotocol_major_match("1.0.0", "2.0.0"));
+        assert!(!subprotocol_major_match("2.0.0", "1.9.9"));
+    }
+
+    #[test]
+    fn normalize_intent_meta_adds_default_reasons() {
+        let meta = json!({});
+        let normalized = normalize_intent_meta(&meta);
+        // Should add reasons including pending, replay, and channel:global
+        let reasons = normalized.get("reasons").and_then(|v| v.as_array()).unwrap();
+        let reason_strs: Vec<&str> = reasons.iter().filter_map(|r| r.as_str()).collect();
+        assert!(reason_strs.contains(&"pending"));
+        assert!(reason_strs.contains(&"replay"));
+        assert!(reason_strs.contains(&"channel:global"));
+    }
+
+    #[test]
+    fn normalize_intent_meta_preserves_existing_channels() {
+        let meta = json!({"channels": ["custom-channel"]});
+        let normalized = normalize_intent_meta(&meta);
+        let channels = normalized.get("channels").and_then(|v| v.as_array()).unwrap();
+        assert!(channels.iter().any(|c| c.as_str() == Some("custom-channel")));
+        let reasons = normalized.get("reasons").and_then(|v| v.as_array()).unwrap();
+        let reason_strs: Vec<&str> = reasons.iter().filter_map(|r| r.as_str()).collect();
+        assert!(reason_strs.contains(&"channel:custom-channel"));
     }
 }

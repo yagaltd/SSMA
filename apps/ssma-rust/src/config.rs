@@ -58,7 +58,10 @@ impl Config {
         let anonymous_cookie_name =
             std::env::var("SSMA_ANON_COOKIE").unwrap_or_else(|_| "ssma_anon".to_string());
         let auth_jwt_secret = std::env::var("SSMA_AUTH_JWT_SECRET")
-            .unwrap_or_else(|_| "change-me-in-production".to_string());
+            .unwrap_or_else(|_| {
+                tracing::warn!("SSMA_AUTH_JWT_SECRET not set – using insecure default. This MUST NOT be used in production!");
+                "change-me-in-production".to_string()
+            });
         let require_auth_for_writes = std::env::var("SSMA_OPTIMISTIC_REQUIRE_AUTH_WRITES")
             .map(|v| v == "true")
             .unwrap_or(false);
@@ -126,15 +129,15 @@ impl Config {
             .map(|v| v == "true")
             .unwrap_or(true);
         let allowed_origins =
-            std::env::var("SSMA_ALLOWED_ORIGINS").unwrap_or_else(|_| "*".to_string());
-        let optimistic_rework_window_ms = std::env::var("SSMA_OPTIMISTIC_REWORK_MS")
+            std::env::var("SSMA_ALLOWED_ORIGINS").unwrap_or_default();
+        let optimistic_rework_window_ms = std::env::var("SSMA_OPTIMISTIC_REWORK_WINDOW_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(300_000);
+            .unwrap_or(60_000);
         let optimistic_rework_max = std::env::var("SSMA_OPTIMISTIC_REWORK_MAX")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(50);
+            .unwrap_or(20);
         let sse_retry_ms = std::env::var("SSMA_SSE_RETRY_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())

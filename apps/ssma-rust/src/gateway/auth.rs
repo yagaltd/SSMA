@@ -73,7 +73,9 @@ impl UserStore {
     fn persist(&self) -> Result<(), String> {
         let data = self.state.lock().map_err(|e| e.to_string())?;
         let json = serde_json::to_string_pretty(&*data).map_err(|e| e.to_string())?;
-        fs::write(&self.path, json).map_err(|e| e.to_string())
+        let tmp = self.path.with_extension("json.tmp");
+        fs::write(&tmp, json).map_err(|e| e.to_string())?;
+        fs::rename(&tmp, &self.path).map_err(|e| e.to_string())
     }
 
     pub(crate) fn find_by_email(&self, email: &str) -> Option<UserRecord> {
@@ -325,4 +327,53 @@ pub(crate) async fn me(
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "USER_NOT_FOUND"))?;
 
     Ok(Json(user_to_json(&user)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_and_verify_password() {
+        let password = "secure-p@ssw0rd!";
+        let hash = hash_password(password).expect("hashing should succeed");
+        assert!(verify_password(password, &hash));
+        assert!(!verify_password("wrong-password", &hash));
+    }
+
+    #[test]
+    fn hash_generates_unique_salts() {
+        let password = "same-password";
+        let hash1 = hash_password(password).unwrap();
+        let hash2 = hash_password(password).unwrap();
+        // Different salts → different hashes
+        assert_ne!(hash1, hash2);
+        // But both verify correctly
+        assert!(verify_password(password, &hash1));
+        assert!(verify_password(password, &hash2));
+    }
+
+    #[test]
+    fn verify_rejects_invalid_hash_format() {
+        assert!(!verify_password("password", "not-a-valid-hash"));
+    }
+
+    #[test]
+    fn user_to_json_excludes_password_hash() {
+        let user = UserRecord {
+            id: "u1".into(),
+            email: "a@b.com".into(),
+            password_hash: "secret".into(),
+            name: "Test".into(),
+            role: "user".into(),
+            status: "active".into(),
+            created_at: 0,
+            updated_at: 0,
+            last_login_at: None,
+        };
+        let json = user_to_json(&user);
+        assert!(json.get("passwordHash").is_none());
+        assert!(json.get("password_hash").is_none());
+        assert_eq!(json["email"], "a@b.com");
+    }
 }

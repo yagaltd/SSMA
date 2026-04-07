@@ -171,3 +171,31 @@ pub(crate) async fn delete_asset(
     );
     Ok(Json(json!({ "status": "ok", "deleted": true })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_type_from_mime_image() {
+        assert_eq!(media_type_from_mime("image/png"), Some("image"));
+        assert_eq!(media_type_from_mime("image/jpeg"), Some("image"));
+        assert_eq!(media_type_from_mime("image/gif"), Some("image"));
+        assert_eq!(media_type_from_mime("image/webp"), Some("image"));
+    }
+
+    #[test]
+    fn media_type_from_mime_audio() {
+        assert_eq!(media_type_from_mime("audio/mpeg"), Some("audio"));
+        assert_eq!(media_type_from_mime("audio/ogg"), Some("audio"));
+        assert_eq!(media_type_from_mime("audio/wav"), Some("audio"));
+    }
+
+    #[test]
+    fn media_type_from_mime_rejects_unknown() {
+        assert_eq!(media_type_from_mime("video/mp4"), None);
+        assert_eq!(media_type_from_mime("application/pdf"), None);
+        assert_eq!(media_type_from_mime("text/plain"), None);
+        assert_eq!(media_type_from_mime(""), None);
+    }
+}

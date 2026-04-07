@@ -16,6 +16,8 @@ pub struct IntentRecord {
     pub site: String,
     pub status: String,
     pub connection_id: Option<String>,
+    pub actor_key: Option<String>,
+    pub user_id: Option<String>,
     pub backend: Option<serde_json::Value>,
 }
 
@@ -94,6 +96,7 @@ impl IntentStore {
         }
 
         self.trim_replay_window_locked(&mut state);
+        self.rebuild_index_locked(&state, &mut index);
         let _ = self.flush_locked(&state);
 
         AppendOutcome {
@@ -133,6 +136,34 @@ impl IntentStore {
         let _ = self.flush_locked(&state);
     }
 
+    pub fn update_entry<F>(&self, id: &str, site: &str, updater: F) -> Option<IntentRecord>
+    where
+        F: Fn(&mut IntentRecord),
+    {
+        let key = Self::dedupe_key(id, site);
+        let mut state = self.state.lock().expect("store state lock");
+        let mut index = self.index.lock().expect("store index lock");
+        let mut updated = None;
+
+        if let Some(entry) = index.get_mut(&key) {
+            updater(entry);
+            updated = Some(entry.clone());
+        }
+
+        for entry in state.entries.iter_mut() {
+            if entry.id == id && entry.site == site {
+                updater(entry);
+                updated = Some(entry.clone());
+            }
+        }
+
+        if updated.is_some() {
+            let _ = self.flush_locked(&state);
+        }
+
+        updated
+    }
+
     pub fn entries_after(&self, cursor: u64, limit: usize) -> Vec<IntentRecord> {
         let state = self.state.lock().expect("store state lock");
         state
@@ -165,13 +196,31 @@ impl IntentStore {
         }
     }
 
+    fn rebuild_index_locked(
+        &self,
+        state: &PersistedStore,
+        index: &mut HashMap<String, IntentRecord>,
+    ) {
+        index.clear();
+        for entry in &state.entries {
+            index.insert(Self::dedupe_key(&entry.id, &entry.site), entry.clone());
+        }
+    }
+
+    pub fn flush_to_disk(&self) -> std::io::Result<()> {
+        let state = self.state.lock().expect("store state lock");
+        self.flush_locked(&state)
+    }
+
     fn flush_locked(&self, state: &PersistedStore) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
         let raw = serde_json::to_string_pretty(state)
             .unwrap_or_else(|_| "{\"version\":1,\"entries\":[]}".to_string());
-        fs::write(&self.path, raw)
+        let tmp = self.path.with_extension("json.tmp");
+        fs::write(&tmp, raw)?;
+        fs::rename(&tmp, &self.path)
     }
 
     fn dedupe_key(id: &str, site: &str) -> String {
@@ -191,4 +240,76 @@ pub fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     now.as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn make_intent(id: &str, site: &str) -> IntentRecord {
+        IntentRecord {
+            id: id.to_string(),
+            intent: "TEST".to_string(),
+            payload: serde_json::json!({}),
+            meta: serde_json::json!({"clock": 1}),
+            inserted_at: now_millis(),
+            log_seq: 0,
+            site: site.to_string(),
+            status: "acked".to_string(),
+            connection_id: None,
+            actor_key: None,
+            user_id: None,
+            backend: None,
+        }
+    }
+
+    #[test]
+    fn store_creates_empty_file_on_new() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("store.json");
+        let store = IntentStore::new(path.clone(), 300_000, 100);
+        assert_eq!(store.total_entries(), 0);
+    }
+
+    #[test]
+    fn store_persists_to_disk() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("store.json");
+        let store = IntentStore::new(path.clone(), 300_000, 100);
+        store.append_batch(vec![make_intent("a", "s1")]);
+        assert!(path.exists());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("a"));
+    }
+
+    #[test]
+    fn atomic_write_creates_no_tmp_file_after_flush() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("store.json");
+        let store = IntentStore::new(path.clone(), 300_000, 100);
+        store.append_batch(vec![make_intent("x", "s1")]);
+        assert!(path.exists());
+        assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn deduplication_uses_site_and_id() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("store.json");
+        let store = IntentStore::new(path.clone(), 300_000, 100);
+
+        let r1 = make_intent("dup", "site-a");
+        let r2 = make_intent("dup", "site-a");
+        let r3 = make_intent("dup", "site-b");
+
+        let first = store.append_batch(vec![r1]);
+        let second = store.append_batch(vec![r2]);
+        let third = store.append_batch(vec![r3]);
+
+        assert_eq!(first.fresh.len(), 1);
+        assert_eq!(second.fresh.len(), 0); // same site+id → deduped
+        assert_eq!(second.replayed.len(), 1);
+        assert_eq!(third.fresh.len(), 1);   // different site → fresh
+    }
 }

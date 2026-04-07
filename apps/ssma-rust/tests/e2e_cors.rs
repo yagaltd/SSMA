@@ -16,6 +16,7 @@ fn test_config(tmp: &Path) -> Config {
     config.user_store_path = tmp.join("users.json");
     config.intent_store_path = tmp.join("intents.json");
     config.media_storage_root = tmp.join("media");
+    config.allowed_origins = "*".to_string(); // Enable CORS for tests
     config
 }
 

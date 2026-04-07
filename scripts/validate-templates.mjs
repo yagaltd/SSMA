@@ -1,8 +1,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const repoRoot = process.cwd();
+const repoRoot = path.resolve(process.cwd());
 const templatesDir = path.join(repoRoot, 'templates');
+
+/** Reject paths that escape the repository root. */
+function safePath(candidate) {
+  const resolved = path.resolve(repoRoot, candidate);
+  if (!resolved.startsWith(repoRoot + path.sep) && resolved !== repoRoot) {
+    return null;
+  }
+  return resolved;
+}
 
 function fail(message) {
   console.error(`[validate:templates] ${message}`);
@@ -50,7 +59,11 @@ for (const templateName of templates) {
     fail(`${templateName}: requiredFiles must be a non-empty array`);
   } else {
     for (const rel of manifest.requiredFiles) {
-      const target = path.join(repoRoot, rel);
+      const target = safePath(rel);
+      if (!target) {
+        fail(`${templateName}: path traversal rejected: ${rel}`);
+        continue;
+      }
       if (!fs.existsSync(target)) {
         fail(`${templateName}: required file does not exist: ${rel}`);
       }
@@ -62,7 +75,11 @@ for (const templateName of templates) {
       fail(`${templateName}: sourcePaths must be a non-empty array when provided`);
     } else {
       for (const rel of manifest.sourcePaths) {
-        const target = path.join(repoRoot, rel);
+        const target = safePath(rel);
+        if (!target) {
+          fail(`${templateName}: path traversal rejected: ${rel}`);
+          continue;
+        }
         if (!fs.existsSync(target)) {
           fail(`${templateName}: source path does not exist: ${rel}`);
         }
