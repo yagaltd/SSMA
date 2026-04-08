@@ -26,8 +26,6 @@ apps/ssma-rust/src/
 ├── main.rs              Entry point
 ├── config.rs            Config::from_env()
 ├── protocol.rs          JSON schema validation
-├── runtime.rs           IntentStore
-├── backend.rs           BackendHttpClient
 ├── domain/runtime.rs    IntentStore
 ├── adapters/backend.rs  BackendHttpClient
 ├── transport/           AppState, router, WS/SSE/auth/admin/internal

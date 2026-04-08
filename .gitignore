@@ -10,6 +10,7 @@ apps/ssma-rust/target/
 # Runtime data (mutated at runtime, not for version control)
 apps/ssma-rust/data/*.json
 apps/ssma-rust/data/media/
+roadmap.md
 
 *.log
 .DS_Store

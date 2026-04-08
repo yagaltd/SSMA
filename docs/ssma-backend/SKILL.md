@@ -239,12 +239,6 @@ Headers: `x-ssma-backend-token: <token>`
 }
 ```
 
-## Experimental Audio / WebRTC
-
-Audio and WebRTC files may exist under `src/experimental/`, but they are not part of the active SSMA gateway surface.
-
-Do not add backend contracts for audio/WebRTC unless that feature is explicitly brought back into the runtime and documented in transport docs.
-
 ## Failure Semantics
 
 | Scenario | Return |

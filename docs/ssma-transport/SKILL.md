@@ -49,7 +49,7 @@ description: Work on HTTP endpoints, WebSocket handlers, SSE streams, or admin A
 
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `/internal/backend/events` | POST | Ingest backend events (invalidations, audio) |
+| `/internal/backend/events` | POST | Ingest backend events (invalidations and related backend-driven fanout) |
 | `/internal/assets` | POST | Backend-created asset upload |
 | `/internal/assets/:assetId` | GET | Asset metadata (backend access) |
 | `/internal/assets/:assetId/content` | GET | Raw bytes (backend access) |
