@@ -108,6 +108,32 @@ impl BackendHttpClient {
         .await
     }
 
+    pub async fn submit_form(
+        &self,
+        form_name: &str,
+        payload: Value,
+        meta: Value,
+        context: &BackendContext,
+    ) -> Result<Value, reqwest::Error> {
+        if !self.is_configured() {
+            return Ok(serde_json::json!({
+                "status": "ok",
+                "data": Value::Null,
+                "backend": "unconfigured"
+            }));
+        }
+        self.post_json(
+            "/forms/submit",
+            serde_json::json!({
+                "formName": form_name,
+                "payload": payload,
+                "meta": meta,
+                "context": context
+            }),
+        )
+        .await
+    }
+
     pub async fn health(&self, context: &BackendContext) -> Result<Value, reqwest::Error> {
         if !self.is_configured() {
             return Ok(serde_json::json!({ "status": "ok", "backend": "unconfigured" }));

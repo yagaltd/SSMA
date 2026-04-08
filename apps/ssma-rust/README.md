@@ -7,6 +7,7 @@ This directory contains the active Rust runtime for SSMA: a backend-agnostic rea
 - Runnable Axum gateway runtime
 - Public query endpoint `/query/:name`
 - Public streaming query endpoint `/query/:name/stream`
+- Public form ingress endpoint `/forms/submit`
 - WS endpoint `/optimistic/ws` and SSE endpoint `/optimistic/events`
 - Health endpoint `/health` and readiness endpoint `/ready`
 - Metrics endpoint `/optimistic/metrics`
@@ -72,6 +73,7 @@ From `apps/ssma-rust/`:
 - SSE endpoint: `/optimistic/events`
 - Public query endpoint: `/query/:name`
 - Public streaming query endpoint: `/query/:name/stream`
+- Public form ingress endpoint: `/forms/submit`
 - Public media routes: `/media/assets`, `/media/assets/:asset_id`, `/media/assets/:asset_id/content`
 - Public RTC signaling routes: `/rtc/sessions`, `/rtc/sessions/:session_id/signals`
 - Backend event ingest endpoint: `/internal/backend/events`

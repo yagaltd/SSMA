@@ -17,6 +17,7 @@ description: Work on HTTP endpoints, WebSocket handlers, SSE streams, or admin A
 | `/optimistic/events` | GET | `sse::sse_events()` | SSE stream |
 | `/query/:name` | POST | `public_query()` | Forward query to backend adapter (JSON response) |
 | `/query/:name/stream` | POST | `public_query_stream()` | Forward query with SSE streaming (NDJSON) |
+| `/forms/submit` | POST | `features::forms::submit_form()` | Validate/rate-limit/honeypot/captcha hook then forward to backend |
 | `/auth/register` | POST | `auth::register()` | Create account |
 | `/auth/login` | POST | `auth::login()` | Authenticate |
 | `/auth/logout` | POST | `auth::logout()` | Clear session |
@@ -128,6 +129,7 @@ GET /optimistic/events?site=<site>&cursor=<n>&islands=a,b
 - `transport/ws.rs` — WebSocket session loop, intent/channel handling
 - `transport/sse.rs` — SSE stream construction
 - `transport/admin.rs` — Staff-only endpoints
+- `features/forms.rs` — Form handling ingress + anti-bot hooks
 - `features/logs.rs` — Log relay forwarding
 - `transport/internal.rs` — Backend event ingestion, internal assets
 

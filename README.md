@@ -12,6 +12,7 @@ Sits between frontend clients and your business backend. Owns transport, auth, p
 - Channel subscription fanout
 - Media upload/download
 - RTC signaling coordination
+- Generic form ingress handling (honeypot/captcha hooks + backend forward)
 - Backend adapter forwarding
 - Protocol validation
 
@@ -66,7 +67,7 @@ apps/ssma-rust/          Gateway binary
 │   ├── domain/runtime.rs IntentStore (persist, dedupe, replay)
 │   ├── adapters/backend.rs BackendHttpClient (adapter calls)
 │   ├── transport/       Inbound HTTP/WS/SSE transport
-│   └── features/        Feature handlers (media, rtc, logs, optimistic)
+│   └── features/        Feature handlers (forms, media, rtc, logs, optimistic)
 └── tests/               E2E + unit tests
 
 packages/ssma-protocol/  Shared contracts + vectors
@@ -117,6 +118,9 @@ Read before changing code:
 ### Query
 - `POST /query/:name` (JSON)
 - `POST /query/:name/stream` (SSE)
+
+### Forms
+- `POST /forms/submit` (JSON)
 
 ### Media
 - `POST /media/assets`

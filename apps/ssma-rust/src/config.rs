@@ -38,6 +38,11 @@ pub struct Config {
     pub optimistic_max_entries: usize,
     pub log_relay_url: String,
     pub backend_timeout_ms: u64,
+    pub form_rate_window_ms: i64,
+    pub form_rate_max: u32,
+    pub form_captcha_mode: String,
+    pub form_captcha_verify_url: String,
+    pub form_captcha_timeout_ms: u64,
 }
 
 impl Config {
@@ -158,6 +163,22 @@ impl Config {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(5000);
+        let form_rate_window_ms = std::env::var("SSMA_FORM_RATE_WINDOW_MS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(60_000);
+        let form_rate_max = std::env::var("SSMA_FORM_RATE_MAX")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(20);
+        let form_captcha_mode = std::env::var("SSMA_FORM_CAPTCHA_MODE")
+            .unwrap_or_else(|_| "disabled".to_string());
+        let form_captcha_verify_url = std::env::var("SSMA_FORM_CAPTCHA_VERIFY_URL")
+            .unwrap_or_default();
+        let form_captcha_timeout_ms = std::env::var("SSMA_FORM_CAPTCHA_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(3000);
         Self {
             host,
             port,
@@ -194,6 +215,11 @@ impl Config {
             optimistic_max_entries,
             log_relay_url,
             backend_timeout_ms,
+            form_rate_window_ms,
+            form_rate_max,
+            form_captcha_mode,
+            form_captcha_verify_url,
+            form_captcha_timeout_ms,
         }
     }
 
@@ -258,6 +284,33 @@ impl Config {
             tracing::warn!(
                 "auth_cookie_secure=true with explicit origins - ensure reverse proxy handles HTTPS"
             );
+        }
+
+        // Validate form captcha configuration
+        match self.form_captcha_mode.as_str() {
+            "disabled" => {}
+            "external" => {
+                if self.form_captcha_verify_url.is_empty() {
+                    return Err(
+                        "SSMA_FORM_CAPTCHA_VERIFY_URL must be set when SSMA_FORM_CAPTCHA_MODE=external"
+                            .to_string(),
+                    );
+                }
+                if !self.form_captcha_verify_url.starts_with("http://")
+                    && !self.form_captcha_verify_url.starts_with("https://")
+                {
+                    return Err(
+                        "SSMA_FORM_CAPTCHA_VERIFY_URL must start with http:// or https://"
+                            .to_string(),
+                    );
+                }
+            }
+            mode => {
+                return Err(format!(
+                    "Invalid SSMA_FORM_CAPTCHA_MODE '{}': expected 'disabled' or 'external'",
+                    mode
+                ));
+            }
         }
 
         Ok(())

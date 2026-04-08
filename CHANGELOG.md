@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-04-08
+
+### Added
+
+- Core form-handling route: `POST /forms/submit`
+- Generic anti-bot handling in gateway core:
+  - honeypot hook (silent-drop behavior via `202 accepted`)
+  - captcha verification hook modes (`disabled` and `external`)
+  - dedicated form-rate limiting
+- Backend adapter support for form forwarding:
+  - new backend contract endpoint: `POST /forms/submit`
+- E2E test coverage for form handling:
+  - valid forward path
+  - honeypot drop path
+  - external captcha pass/fail/timeout
+  - form rate-limit enforcement
+  - invalid payload rejection
+
+### Changed
+
+- Updated template docs, config docs, and backend contract docs to include form handling.
+
 ## [0.2.0] - 2026-04-08
 
 ### Added

@@ -107,6 +107,7 @@ All rate limits use in-memory `Mutex<HashMap<String, RateBucket>>`. Acceptable f
 | Limiter | Config | Default |
 |---------|--------|---------|
 | Global HTTP | `SSMA_RATE_WINDOW_MS` / `SSMA_RATE_MAX` | 120 req / 60s |
+| Forms submit | `SSMA_FORM_RATE_WINDOW_MS` / `SSMA_FORM_RATE_MAX` | 20 req / 60s |
 | Channel subscribe | `SSMA_OPTIMISTIC_CHANNEL_WINDOW_MS` / `SSMA_OPTIMISTIC_CHANNEL_MAX` | 8 / 10s |
 | Rework/undo | `SSMA_OPTIMISTIC_REWORK_WINDOW_MS` / `SSMA_OPTIMISTIC_REWORK_MAX` | 20 / 60s |
 | WS backpressure | `SSMA_WS_MAX_BUFFERED_BYTES` | 256 KB |
@@ -115,6 +116,18 @@ Rate-limited responses:
 - HTTP: `429 Too Many Requests` with `RATE_LIMITED` error code
 - WS: `{ type: "error", code: "RATE_LIMITED" }`
 - Channel subscribe: `{ type: "channel.ack", status: "error", code: "RATE_LIMITED" }`
+
+## Form Anti-Bot Policy
+
+Route: `POST /forms/submit`
+
+- Honeypot:
+  - non-empty honeypot field returns `202 accepted`
+  - request is dropped and not forwarded to backend
+- Captcha:
+  - `SSMA_FORM_CAPTCHA_MODE=disabled` bypasses captcha verification
+  - `SSMA_FORM_CAPTCHA_MODE=external` requires `captchaToken`
+  - failed/unreachable verifier is fail-closed (`CAPTCHA_VERIFICATION_FAILED`)
 
 ## CORS
 

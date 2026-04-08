@@ -93,6 +93,16 @@ All config is loaded from environment variables in `config.rs` → `Config::from
 |----------|---------|-------------|
 | `SSMA_LOG_RELAY_URL` | (empty) | Log forwarding endpoint (empty = disabled) |
 
+### Forms
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SSMA_FORM_RATE_WINDOW_MS` | `60000` | Form submission rate window |
+| `SSMA_FORM_RATE_MAX` | `20` | Max form submissions per window (per site+IP bucket) |
+| `SSMA_FORM_CAPTCHA_MODE` | `disabled` | Captcha mode: `disabled` or `external` |
+| `SSMA_FORM_CAPTCHA_VERIFY_URL` | (empty) | External verifier URL (required when mode is `external`) |
+| `SSMA_FORM_CAPTCHA_TIMEOUT_MS` | `3000` | External verifier timeout |
+
 ## Deployment
 
 ### Single Instance

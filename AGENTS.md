@@ -29,7 +29,7 @@ apps/ssma-rust/src/
 ├── domain/runtime.rs    IntentStore
 ├── adapters/backend.rs  BackendHttpClient
 ├── transport/           AppState, router, WS/SSE/auth/admin/internal
-└── features/            optimistic, media, rtc, logs
+└── features/            optimistic, forms, media, rtc, logs
 ```
 
 ## Canonical Truths
@@ -42,6 +42,7 @@ apps/ssma-rust/src/
 - `channel.invalidate` targets one `channel`, not `channels[]`
 - Auth endpoints return `{ status: "ok", user: {...} }` envelope
 - `/query/:name` = JSON, `/query/:name/stream` = SSE NDJSON
+- `/forms/submit` applies honeypot/captcha hooks and forwards accepted payloads to backend `/forms/submit`
 - Shutdown must stop sockets, listeners, reconnect loops
 
 ## Working Rules

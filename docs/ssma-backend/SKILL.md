@@ -16,6 +16,7 @@ SSMA calls your backend at these routes:
 | `/apply-intents` | POST | Process persisted intents |
 | `/query/:name` | POST | Handle one-shot queries |
 | `/subscribe` | POST | Initialize channel subscription |
+| `/forms/submit` | POST | Process accepted form submissions |
 | `/health` | POST | Backend health check |
 
 Base URL: `SSMA_BACKEND_URL`
@@ -151,6 +152,40 @@ SSMA forwards these as SSE events to the client at `/query/:name/stream`.
 }
 ```
 
+## `POST /forms/submit`
+
+### Request
+
+```json
+{
+  "formName": "contact",
+  "payload": {
+    "email": "user@example.com",
+    "message": "Hello"
+  },
+  "meta": {
+    "source": "landing-page"
+  },
+  "context": {
+    "site": "default",
+    "actorKey": "anon:uuid-or-user-id",
+    "connectionId": null,
+    "ip": "203.0.113.10",
+    "userAgent": "Mozilla/5.0",
+    "user": null
+  }
+}
+```
+
+### Response
+
+```json
+{
+  "status": "ok",
+  "accepted": true
+}
+```
+
 ## `POST /health`
 
 ### Request
@@ -254,4 +289,5 @@ When `SSMA_BACKEND_URL` is empty:
 - `applyIntents` → returns `{ results: [] }` (silent no-op)
 - `query` → returns `{ status: "ok", data: null }`
 - `subscribe` → returns `{ status: "ok", snapshot: [], cursor: 0 }`
+- `submitForm` → returns `{ status: "ok", data: null, backend: "unconfigured" }`
 - `health` → returns `{ status: "ok", backend: "unconfigured" }`

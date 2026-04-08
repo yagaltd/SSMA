@@ -258,6 +258,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/ready", get(ready))
         .route("/query/:name", post(public_query))
         .route("/query/:name/stream", post(public_query_stream))
+        .route("/forms/submit", post(crate::features::forms::submit_form))
         .route("/auth/register", post(auth::register))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
