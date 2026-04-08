@@ -74,8 +74,19 @@ impl UserStore {
         let data = self.state.lock().map_err(|e| e.to_string())?;
         let json = serde_json::to_string_pretty(&*data).map_err(|e| e.to_string())?;
         let tmp = self.path.with_extension("json.tmp");
-        fs::write(&tmp, json).map_err(|e| e.to_string())?;
-        fs::rename(&tmp, &self.path).map_err(|e| e.to_string())
+        let mut file = fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        use std::io::Write;
+        file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
+        fs::rename(&tmp, &self.path).map_err(|e| e.to_string())?;
+        // Sync parent directory for crash durability
+        if let Some(parent) = self.path.parent() {
+            if let Ok(dir) = fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn find_by_email(&self, email: &str) -> Option<UserRecord> {

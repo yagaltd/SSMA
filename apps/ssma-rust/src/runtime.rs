@@ -219,8 +219,19 @@ impl IntentStore {
         let raw = serde_json::to_string_pretty(state)
             .unwrap_or_else(|_| "{\"version\":1,\"entries\":[]}".to_string());
         let tmp = self.path.with_extension("json.tmp");
-        fs::write(&tmp, raw)?;
-        fs::rename(&tmp, &self.path)
+        let mut file = fs::File::create(&tmp)?;
+        use std::io::Write;
+        file.write_all(raw.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, &self.path)?;
+        // Sync parent directory for crash durability
+        if let Some(parent) = self.path.parent() {
+            if let Ok(dir) = fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(())
     }
 
     fn dedupe_key(id: &str, site: &str) -> String {
