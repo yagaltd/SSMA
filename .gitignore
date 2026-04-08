@@ -6,9 +6,10 @@ apps/ssma-rust/target/
 .env.local
 .env.*.local
 .CSMA/
-ssma_tauri.md
-ssma_backend_starter.md
-roadmap.md
+
+# Runtime data (mutated at runtime, not for version control)
+apps/ssma-rust/data/*.json
+apps/ssma-rust/data/media/
 
 *.log
 .DS_Store

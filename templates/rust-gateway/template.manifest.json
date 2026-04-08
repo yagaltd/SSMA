@@ -14,16 +14,16 @@
   "sourcePaths": [
     "apps/ssma-rust",
     "packages/ssma-protocol",
-    "docs/index.md",
-    "docs/README.md",
-    "docs/architecture",
-    "docs/protocol",
-    "docs/security",
-    "docs/operations",
-    "docs/testing",
-    "docs/api",
-    "README.md",
-    "package.json"
+    "skills/ssma-overview",
+    "skills/ssma-protocol",
+    "skills/ssma-security",
+    "skills/ssma-transport",
+    "skills/ssma-optimistic",
+    "skills/ssma-backend",
+    "skills/ssma-config",
+    "skills/ssma-testing",
+    "AGENTS.md",
+    "README.md"
   ],
   "compat": {
     "recommendedCli": ">=0.1.0"
