@@ -38,7 +38,6 @@ pub struct Config {
     pub optimistic_max_entries: usize,
     pub log_relay_url: String,
     pub backend_timeout_ms: u64,
-    pub storage_driver: String,
 }
 
 impl Config {
@@ -159,9 +158,6 @@ impl Config {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(5000);
-        let storage_driver = std::env::var("SSMA_STORAGE_DRIVER")
-            .unwrap_or_else(|_| "file".to_string());
-
         Self {
             host,
             port,
@@ -198,7 +194,6 @@ impl Config {
             optimistic_max_entries,
             log_relay_url,
             backend_timeout_ms,
-            storage_driver,
         }
     }
 

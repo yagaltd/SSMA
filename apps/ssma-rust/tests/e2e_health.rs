@@ -126,6 +126,29 @@ async fn ready_includes_subprotocol() {
 }
 
 #[tokio::test]
+async fn ready_returns_503_when_backend_is_unreachable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = test_config(tmp.path());
+    config.backend_url = "http://127.0.0.1:9".to_string();
+    let state = gateway::build_state(config);
+    let app = gateway::app(state);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/ready")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "not_ready");
+    assert_eq!(json["backend"], "unreachable");
+}
+
+#[tokio::test]
 async fn config_validation_rejects_insecure_jwt_secret() {
     let tmp = tempfile::tempdir().unwrap();
     let mut config = Config::from_env();

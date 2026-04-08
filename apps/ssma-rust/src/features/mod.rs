@@ -1,4 +1,3 @@
-pub mod events;
 pub mod logs;
 pub mod media;
 pub mod optimistic;

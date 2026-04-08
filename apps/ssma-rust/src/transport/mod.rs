@@ -306,7 +306,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .layer(
             ServiceBuilder::new()
-                .layer(TimeoutLayer::new(short_timeout))
+                .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, short_timeout))
                 .layer(DefaultBodyLimit::max(
                     state.config.media_max_upload_bytes as usize,
                 ))
@@ -320,7 +320,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/optimistic/events", get(sse::sse_events))
         .layer(
             ServiceBuilder::new()
-                .layer(TimeoutLayer::new(long_timeout)),
+                .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, long_timeout)),
         )
         .with_state(state);
 
@@ -695,10 +695,22 @@ pub(crate) fn emit_server_event(state: &Arc<AppState>, event_name: &str, payload
         let value = counters.entry(event_upper.clone()).or_insert(0);
         *value += 1;
     }
+    let site = payload.get("site").and_then(Value::as_str);
+    let connection_id = payload.get("connectionId").and_then(Value::as_str);
+    let channel = payload.get("channel").and_then(Value::as_str);
+    let code = payload.get("code").and_then(Value::as_str);
+    let intent_id = payload.get("id").and_then(Value::as_str);
+
     // Standardized structured logging with consistent field names
     tracing::info!(
+        service = "ssma-rust",
         event = event_upper.as_str(),
         event_type = "server_event",
+        site = site,
+        connection_id = connection_id,
+        channel = channel,
+        code = code,
+        intent_id = intent_id,
         payload = %payload,
         "ssma.server_event"
     );

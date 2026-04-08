@@ -31,7 +31,7 @@ apps/ssma-rust/src/
 ├── domain/runtime.rs    IntentStore
 ├── adapters/backend.rs  BackendHttpClient
 ├── transport/           AppState, router, WS/SSE/auth/admin/internal
-└── features/            optimistic, media, rtc, audio, webrtc
+└── features/            optimistic, media, rtc, logs
 ```
 
 ## Canonical Truths

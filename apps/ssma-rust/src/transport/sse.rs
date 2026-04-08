@@ -36,7 +36,7 @@ pub(crate) fn is_sse_event_authorized(
 ) -> bool {
     if extract_event_channels(event)
         .iter()
-        .any(|channel| channel.starts_with("rtc.session.") || channel.starts_with("audio.session."))
+        .any(|channel| channel.starts_with("rtc.session."))
     {
         return false;
     }

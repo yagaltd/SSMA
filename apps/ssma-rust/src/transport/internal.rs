@@ -3,7 +3,6 @@ use super::{
     purge_expired_runtime_state, ApiResult, AppState, AssetRecord,
     BackendEventsPayload,
 };
-use crate::features::audio;
 use crate::runtime::{now_millis, now_secs};
 use axum::extract::{Multipart, Path, State};
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
@@ -15,22 +14,6 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 pub(crate) fn publish_backend_event(state: &Arc<AppState>, event: &Value) {
-    if let Some(event_type) = event.get("eventType").and_then(|v| v.as_str()) {
-        if let Some(audio_session_id) = event.get("audioSessionId").and_then(|v| v.as_str()) {
-            let site = event
-                .get("site")
-                .and_then(|v| v.as_str())
-                .unwrap_or("default")
-                .to_string();
-            let payload = event.get("payload").cloned().unwrap_or_else(|| json!({}));
-            if let Some(broadcast) =
-                audio::record_backend_audio_event(state, &site, audio_session_id, event_type, payload)
-            {
-                super::broadcast_app_event(state, broadcast);
-            }
-            return;
-        }
-    }
     let reason = event
         .get("reason")
         .and_then(|v| v.as_str())

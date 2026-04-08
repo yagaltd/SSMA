@@ -36,6 +36,7 @@ All config is loaded from environment variables in `config.rs` → `Config::from
 | `SSMA_JWT_AUDIENCE` | `csma-clients` | JWT audience claim |
 | `SSMA_ACCESS_TTL_MS` | `900000` | JWT lifetime (15 min) |
 | `SSMA_AUTH_COOKIE_SECURE` | `true` | Set `Secure` flag on cookies |
+| `SSMA_AUTH_COOKIE_SAMESITE` | `Lax` | Cookie `SameSite` mode |
 
 ### CORS
 
@@ -101,6 +102,14 @@ cd apps/ssma-rust
 cargo run --release
 ```
 
+Recommended for real single-node deployments:
+- set `SSMA_AUTH_JWT_SECRET` explicitly
+- keep persistent storage mounted for `./data`
+- run behind HTTPS reverse proxy
+- keep `SSMA_AUTH_COOKIE_SECURE=true`
+- use `/ready` for readiness probes
+- use `/health` for simple liveness checks
+
 ### Docker
 
 ```dockerfile
@@ -143,6 +152,18 @@ Response:
   "cursor": 12345
 }
 ```
+
+## Readiness Check
+
+```bash
+curl http://localhost:5050/ready
+```
+
+Readiness semantics:
+- `200 ok` when gateway is booted and backend is either healthy or unconfigured
+- `503 not_ready` when configured backend is unreachable
+
+Use `/ready` for orchestrators. Use `/health` for lightweight liveness.
 
 ## Metrics
 

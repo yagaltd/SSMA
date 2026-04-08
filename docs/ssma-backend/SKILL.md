@@ -239,29 +239,11 @@ Headers: `x-ssma-backend-token: <token>`
 }
 ```
 
-## Realtime Audio Events
+## Experimental Audio / WebRTC
 
-```json
-{
-  "event": {
-    "site": "default",
-    "audioSessionId": "session-uuid",
-    "eventType": "audio.session.partial_transcript",
-    "payload": { "text": "Hello world" }
-  }
-}
-```
+Audio and WebRTC files may exist under `src/experimental/`, but they are not part of the active SSMA gateway surface.
 
-Event types:
-- `audio.session.started`
-- `audio.session.partial_transcript`
-- `audio.session.final_transcript`
-- `audio.session.audio_out_started`
-- `audio.session.audio_out_chunk`
-- `audio.session.audio_out_stopped`
-- `audio.session.interrupted`
-- `audio.session.ended`
-- `audio.session.error`
+Do not add backend contracts for audio/WebRTC unless that feature is explicitly brought back into the runtime and documented in transport docs.
 
 ## Failure Semantics
 

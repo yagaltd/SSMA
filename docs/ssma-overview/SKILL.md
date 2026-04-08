@@ -19,6 +19,7 @@ SSMA is a backend-agnostic realtime gateway written in Rust. It sits between fro
 - Backend adapter forwarding
 
 SSMA does **not** own business logic. It delegates to your backend through a narrow adapter contract.
+Experimental audio/WebRTC files may exist outside the active runtime surface and should not be wired into gateway routes without an explicit product decision.
 
 ## Architecture Layers
 
@@ -48,14 +49,12 @@ apps/ssma-rust/
 │   │   ├── sse.rs           # SSE stream with replay
 │   │   ├── auth.rs          # UserStore, register/login/logout/JWT
 │   │   ├── admin.rs         # Staff-only channel/intent inspection
-│   │   ├── logs.rs          # Log relay forwarding
 │   │   └── internal.rs      # Backend-to-SSMA event ingestion
 │   └── features/
+│       ├── logs.rs          # Log relay forwarding
 │       ├── optimistic.rs    # Rework/undo/pending queries
 │       ├── media.rs         # Asset upload/download/delete
-│       ├── audio.rs         # Audio session management
-│       ├── rtc.rs           # RTC signaling
-│       └── webrtc.rs        # WebRTC bridge manager
+│       └── rtc.rs           # RTC signaling
 ├── tests/
 │   ├── e2e_*.rs             # End-to-end tests
 │   ├── conformance_runtime.rs

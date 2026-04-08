@@ -31,16 +31,12 @@ description: Work on HTTP endpoints, WebSocket handlers, SSE streams, or admin A
 | `/media/assets/:assetId/content` | GET | `media::get_asset_content()` | Raw bytes |
 | `/media/assets/:assetId` | DELETE | `media::delete_asset()` | Remove asset |
 
-### RTC & Audio
+### RTC
 
 | Route | Method | Handler | Purpose |
 |-------|--------|---------|---------|
 | `/rtc/sessions` | POST | `rtc::create_session()` | Create signaling session |
 | `/rtc/sessions/:id/signals` | POST | `rtc::submit_signal()` | Offer/answer/candidate |
-| `/audio/sessions` | POST | `audio::create_session()` | Create audio session |
-| `/audio/sessions/:id` | GET | `audio::get_session()` | Session metadata |
-| `/audio/sessions/:id` | DELETE | `audio::delete_session()` | End session |
-| `/audio/sessions/:id/commands` | POST | `audio::command_session()` | start/pause/resume/stop |
 
 ### Admin (staff+ required)
 
@@ -63,8 +59,8 @@ description: Work on HTTP endpoints, WebSocket handlers, SSE streams, or admin A
 
 | Route | Method | Handler | Purpose |
 |-------|--------|---------|---------|
-| `/logs/batch` | POST | `logs::logs_batch()` | Forward logs to relay URL |
-| `/logs/health` | GET | `logs::logs_health()` | Relay status |
+| `/logs/batch` | POST | `features::logs::logs_batch()` | Forward logs to relay URL |
+| `/logs/health` | GET | `features::logs::logs_health()` | Relay status |
 
 ## WebSocket Session
 
@@ -132,7 +128,7 @@ GET /optimistic/events?site=<site>&cursor=<n>&islands=a,b
 - `transport/ws.rs` — WebSocket session loop, intent/channel handling
 - `transport/sse.rs` — SSE stream construction
 - `transport/admin.rs` — Staff-only endpoints
-- `transport/logs.rs` — Log relay forwarding
+- `features/logs.rs` — Log relay forwarding
 - `transport/internal.rs` — Backend event ingestion, internal assets
 
 ## Adding a New Route

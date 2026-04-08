@@ -24,6 +24,30 @@ cargo run
 
 Requires `SSMA_AUTH_JWT_SECRET` in production. See `apps/ssma-rust/.env.example`.
 
+## Single-Node Production
+
+SSMA core now targets a clean single-node gateway deployment:
+- file-backed optimistic intent persistence
+- file-backed user store
+- `/ready` for operator readiness checks
+- bounded backend request timeouts
+- graceful shutdown for WS/SSE clients
+- WS backpressure protection
+
+Recommended deployment model:
+1. run behind HTTPS reverse proxy
+2. keep `SSMA_AUTH_COOKIE_SECURE=true`
+3. set strong `SSMA_AUTH_JWT_SECRET`
+4. mount persistent `./data/` storage
+5. treat SSMA as gateway only; business persistence stays in your backend
+
+Out of scope for SSMA core:
+- opinionated SQLite/Postgres business backend
+- admin product UI
+- durable business workflows
+
+Those belong in future `examples/`.
+
 ## Commands
 
 ```bash
@@ -42,7 +66,7 @@ apps/ssma-rust/          Gateway binary
 │   ├── domain/runtime.rs IntentStore (persist, dedupe, replay)
 │   ├── adapters/backend.rs BackendHttpClient (adapter calls)
 │   ├── transport/       Inbound HTTP/WS/SSE transport
-│   └── features/        Feature handlers (media, rtc, audio, optimistic)
+│   └── features/        Feature handlers (media, rtc, logs, optimistic)
 └── tests/               E2E + unit tests
 
 packages/ssma-protocol/  Shared contracts + vectors
@@ -79,6 +103,7 @@ Read before changing code:
 
 ### Transport
 - `GET /health`
+- `GET /ready`
 - `GET /optimistic/metrics`
 - `GET /optimistic/ws` (WebSocket)
 - `GET /optimistic/events` (SSE)
@@ -99,13 +124,9 @@ Read before changing code:
 - `GET /media/assets/:assetId/content`
 - `DELETE /media/assets/:assetId`
 
-### RTC & Audio
+### RTC
 - `POST /rtc/sessions`
 - `POST /rtc/sessions/:sessionId/signals`
-- `POST /audio/sessions`
-- `GET /audio/sessions/:sessionId`
-- `DELETE /audio/sessions/:sessionId`
-- `POST /audio/sessions/:sessionId/commands`
 
 ### Admin (staff+)
 - `GET /admin/optimistic/channels`
