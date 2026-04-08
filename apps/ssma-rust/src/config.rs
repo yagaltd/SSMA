@@ -29,6 +29,7 @@ pub struct Config {
     pub jwt_audience: String,
     pub access_ttl_ms: u64,
     pub auth_cookie_secure: bool,
+    pub auth_cookie_same_site: String,
     pub allowed_origins: String,
     pub optimistic_rework_window_ms: u64,
     pub optimistic_rework_max: u32,
@@ -128,6 +129,8 @@ impl Config {
         let auth_cookie_secure = std::env::var("SSMA_AUTH_COOKIE_SECURE")
             .map(|v| v == "true")
             .unwrap_or(true);
+        let auth_cookie_same_site = std::env::var("SSMA_AUTH_COOKIE_SAMESITE")
+            .unwrap_or_else(|_| "Lax".to_string());
         let allowed_origins =
             std::env::var("SSMA_ALLOWED_ORIGINS").unwrap_or_default();
         let optimistic_rework_window_ms = std::env::var("SSMA_OPTIMISTIC_REWORK_WINDOW_MS")
@@ -183,6 +186,7 @@ impl Config {
             jwt_audience,
             access_ttl_ms,
             auth_cookie_secure,
+            auth_cookie_same_site,
             allowed_origins,
             optimistic_rework_window_ms,
             optimistic_rework_max,

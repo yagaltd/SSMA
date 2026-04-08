@@ -192,9 +192,10 @@ fn auth_cookie_value(jwt: &str, config: &crate::config::Config) -> String {
     } else {
         ""
     };
+    let same_site = format!("; SameSite={}", config.auth_cookie_same_site);
     format!(
-        "{}={}; Path=/; HttpOnly; SameSite=Lax{}",
-        config.auth_cookie_name, jwt, secure
+        "{}={}; Path=/; HttpOnly{}{}",
+        config.auth_cookie_name, jwt, same_site, secure
     )
 }
 
@@ -204,9 +205,10 @@ fn clear_cookie_value(config: &crate::config::Config) -> String {
     } else {
         ""
     };
+    let same_site = format!("; SameSite={}", config.auth_cookie_same_site);
     format!(
-        "{}=; Path=/; HttpOnly; SameSite=Lax{}; Max-Age=0",
-        config.auth_cookie_name, secure
+        "{}=; Path=/; HttpOnly{}{}; Max-Age=0",
+        config.auth_cookie_name, same_site, secure
     )
 }
 
