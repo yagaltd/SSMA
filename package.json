@@ -1,8 +1,7 @@
 {
-  "name": "ssma-monorepo",
+  "name": "ssma",
   "private": true,
   "scripts": {
-    "test:rust": "cd apps/ssma-rust && cargo test -- --nocapture",
-    "validate:templates": "node scripts/validate-templates.mjs"
+    "test": "cd apps/ssma-rust && cargo test -- --nocapture"
   }
 }

@@ -1,49 +1,63 @@
-SSMA is a backend-agnostic realtime gateway. It owns:
-- WebSocket and SSE transport
-- replay and invalidation fanout
-- auth and RBAC enforcement
-- optimistic intent persistence
-- backend adapter calls
-- protocol validation and conformance
+# AGENTS.md
 
-## Skills (Read Before Changing Code)
+Read before changing code.
 
-Each skill covers a specific domain. Read the relevant skill before making changes:
+## What SSMA Is
 
-- `skills/ssma-overview/SKILL.md` — architecture, module layout, working conventions
-- `skills/ssma-protocol/SKILL.md` — wire protocol, contracts, schema validation
-- `skills/ssma-security/SKILL.md` — auth, RBAC, rate limits, CORS
-- `skills/ssma-transport/SKILL.md` — HTTP endpoints, WS, SSE, admin APIs
-- `skills/ssma-optimistic/SKILL.md` — intent store, replay, fanout, channels
-- `skills/ssma-backend/SKILL.md` — backend adapter contract, media, events
-- `skills/ssma-config/SKILL.md` — env vars, deployment, operations
-- `skills/ssma-testing/SKILL.md` — how to write and run tests
+Rust gateway between frontend clients and business backend. Owns transport, auth, persistence, fanout. Does not own business logic.
 
-## Runtime Map
+## Skills
 
-- Rust runtime: `apps/ssma-rust`
-- Shared contracts: `packages/ssma-protocol/contracts`
-- Shared vectors: `packages/ssma-protocol/vectors`
-- Template manifests: `templates/`
+Each skill covers a domain. Read relevant skill before changes:
+
+- `docs/ssma-overview/SKILL.md` — architecture, code map, conventions
+- `docs/ssma-protocol/SKILL.md` — wire protocol, contracts, validation
+- `docs/ssma-security/SKILL.md` — auth, RBAC, rate limits, CORS
+- `docs/ssma-transport/SKILL.md` — HTTP, WS, SSE endpoints
+- `docs/ssma-optimistic/SKILL.md` — intent store, replay, fanout
+- `docs/ssma-backend/SKILL.md` — backend adapter contract
+- `docs/ssma-config/SKILL.md` — env vars, deployment
+- `docs/ssma-testing/SKILL.md` — how to test
+
+## Code Map
+
+```
+apps/ssma-rust/src/
+├── main.rs              Entry point
+├── config.rs            Config::from_env()
+├── protocol.rs          JSON schema validation
+├── runtime.rs           IntentStore
+├── backend.rs           BackendHttpClient
+└── gateway/
+    ├── mod.rs           AppState, router, helpers
+    ├── ws.rs            WebSocket session
+    ├── sse.rs           SSE stream
+    ├── auth.rs          Register/login/JWT
+    ├── media.rs         Asset upload/download
+    ├── admin.rs         Staff endpoints
+    ├── optimistic.rs    Rework/undo
+    ├── logs.rs          Log relay
+    └── internal.rs      Backend events
+```
 
 ## Canonical Truths
 
-- `ssma_session` is the session token cookie.
-- auth identity comes from the verified session token, not a separate role cookie.
-- guest access is valid for some flows.
-- backend context is canonical camelCase JSON: `site`, `connectionId`, `ip`, `userAgent`, `user: { id, role } | null`.
-- `channel.snapshot`, `channel.replay`, and `channel.invalidate` preserve subscription `params`.
-- `channel.invalidate` targets one `channel`, not `channels[]`.
-- shutdown must stop sockets, listeners, and reconnect loops cleanly.
-- auth endpoints return `{ status: "ok", user: {...} }` envelope (matches CSMA `response.user`).
-- `/query/:name` returns JSON, `/query/:name/stream` returns SSE with NDJSON chunks.
+- `ssma_session` = session cookie name
+- Auth identity from JWT, not separate role cookie
+- Guest access valid for some flows
+- Backend context: `{ site, connectionId, ip, userAgent, user: { id, role } | null }`
+- `channel.snapshot`, `channel.replay`, `channel.invalidate` preserve `params`
+- `channel.invalidate` targets one `channel`, not `channels[]`
+- Auth endpoints return `{ status: "ok", user: {...} }` envelope
+- `/query/:name` = JSON, `/query/:name/stream` = SSE NDJSON
+- Shutdown must stop sockets, listeners, reconnect loops
 
 ## Working Rules
 
-1. Read the relevant skill file
+1. Read relevant skill
 2. Implement
-3. Verify with `cargo test`
-4. Update the skill file if behavior changes
+3. `cargo test`
+4. Update skill if behavior changes
 5. Commit (never broken or undocumented)
 
 ## Commands
@@ -51,15 +65,4 @@ Each skill covers a specific domain. Read the relevant skill before making chang
 ```bash
 cd apps/ssma-rust && cargo test -- --nocapture
 cd apps/ssma-rust && cargo test --test <name> -- --nocapture
-npm run validate:templates
 ```
-
-## Template Rules
-
-- keep guidance generic enough for scaffolded projects
-- prefer contract-first language over repo-local assumptions
-- keep ecosystem addons optional
-
-Do not turn SSMA core into:
-- a provider-specific backend framework
-- a Tauri-only transport layer
