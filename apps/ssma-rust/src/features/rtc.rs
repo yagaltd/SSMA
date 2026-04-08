@@ -203,21 +203,6 @@ pub(crate) async fn post_rtc_signal(
         body.target_id.clone(),
         body.payload.clone(),
     )?;
-
-    if let Some(audio_session) = super::audio::audio_session_for_rtc(&state, &session_id) {
-        let signal = crate::features::webrtc::IncomingRtcSignal {
-            kind: body.kind,
-            sender_id: body.sender_id,
-            target_id: body.target_id,
-            payload: body.payload,
-        };
-        state
-            .webrtc
-            .handle_browser_signal(&audio_session.session_id, signal)
-            .await
-            .map_err(|error| api_error(StatusCode::BAD_GATEWAY, &format!("WEBRTC_SIGNAL_FAILED:{error}")))?;
-    }
-
     Ok(Json(json!({
         "status": "ok",
         "sessionId": session_id,

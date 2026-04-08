@@ -2,6 +2,7 @@ use crate::transport::{
     api_error, collect_gateway_metrics, connection_ip_from_headers, consume_global_rate_limit,
     ApiResult, AppState,
 };
+use crate::features::events::{create_log_entry, event_payload, LogLevel, ServerEvent};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
@@ -101,4 +102,53 @@ pub(crate) async fn logs_health(
         "status": if state.config.log_relay_url.is_empty() { "disabled" } else { "active" },
         "relayUrl": if state.config.log_relay_url.is_empty() { Value::Null } else { Value::String(state.config.log_relay_url.clone()) },
     }))
+}
+
+/// Emit a structured server event with standardized fields
+/// This provides consistent logging for operator-facing monitoring
+pub(crate) fn emit_structured_event(
+    state: &Arc<AppState>,
+    event: ServerEvent,
+    message: &str,
+    context: Value,
+    site: Option<String>,
+    actor_key: Option<String>,
+    connection_id: Option<String>,
+) {
+    // Update metrics counter
+    let event_name = event.as_str().to_string();
+    {
+        let mut counters = state
+            .metrics
+            .server_events
+            .lock()
+            .expect("server events lock");
+        let value = counters.entry(event_name.clone()).or_insert(0);
+        *value += 1;
+    }
+
+    // Create structured log entry
+    let log_entry = create_log_entry(
+        LogLevel::Info,
+        event,
+        message,
+        context,
+        site,
+        actor_key,
+        connection_id,
+    );
+
+    // Emit structured log
+    tracing::info!(
+        event = event_name.as_str(),
+        event_type = "server_event",
+        timestamp = log_entry.timestamp,
+        level = log_entry.level.as_str(),
+        message = %log_entry.message,
+        context = %log_entry.context,
+        site = ?log_entry.site,
+        actor_key = ?log_entry.actor_key,
+        connection_id = ?log_entry.connection_id,
+        "ssma.structured_event"
+    );
 }

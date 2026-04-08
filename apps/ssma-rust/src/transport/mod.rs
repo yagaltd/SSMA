@@ -685,16 +685,23 @@ pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 pub(crate) fn emit_server_event(state: &Arc<AppState>, event_name: &str, payload: Value) {
+    let event_upper = event_name.to_uppercase();
     {
         let mut counters = state
             .metrics
             .server_events
             .lock()
             .expect("server events lock");
-        let value = counters.entry(event_name.to_string()).or_insert(0);
+        let value = counters.entry(event_upper.clone()).or_insert(0);
         *value += 1;
     }
-    tracing::info!(event_name = event_name, payload = %payload, "ssma.server_event");
+    // Standardized structured logging with consistent field names
+    tracing::info!(
+        event = event_upper.as_str(),
+        event_type = "server_event",
+        payload = %payload,
+        "ssma.server_event"
+    );
 }
 
 pub(crate) fn broadcast_app_event(state: &Arc<AppState>, event: Value) {
