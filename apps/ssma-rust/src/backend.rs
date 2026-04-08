@@ -1,11 +1,10 @@
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::pin::Pin;
-use tokio::sync::mpsc;
 
 /// A streaming response from the backend (NDJSON)
-pub type BackendStream = Pin<Box<dyn futures_util::Stream<Item = Result<Value, reqwest::Error>> + Send>>;
+pub type BackendStream = Pin<Box<dyn Stream<Item = Result<Value, String>> + Send>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendUser {
@@ -179,31 +178,53 @@ impl BackendHttpClient {
             .send()
             .await?;
 
-        let stream = response
-            .bytes_stream()
-            .map(|chunk| {
-                chunk.map(|bytes| {
-                    let text = String::from_utf8_lossy(&bytes);
-                    // Parse NDJSON: each line is a JSON object
-                    for line in text.lines() {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            if let Ok(json) = serde_json::from_str::<Value>(trimmed) {
-                                return json;
-                            }
+        Ok(Self::ndjson_stream(response.bytes_stream()))
+    }
+
+    // Buffered NDJSON decoder. Network chunks may split lines or contain many lines.
+    fn ndjson_stream(
+        bytes_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+    ) -> BackendStream {
+        Box::pin(async_stream::stream! {
+            let mut buffer = String::new();
+            futures_util::pin_mut!(bytes_stream);
+
+            while let Some(chunk_result) = bytes_stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        yield Err(error.to_string());
+                        return;
+                    }
+                };
+
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                while let Some(pos) = buffer.find('\n') {
+                    let line = buffer[..pos].trim().to_string();
+                    buffer.drain(..=pos);
+
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    match serde_json::from_str::<Value>(&line) {
+                        Ok(value) => yield Ok(value),
+                        Err(error) => {
+                            yield Err(format!("INVALID_NDJSON: {}", error));
+                            return;
                         }
                     }
-                    Value::Null
-                })
-            })
-            .filter_map(|result| async move {
-                match result {
-                    Ok(val) if !val.is_null() => Some(Ok(val)),
-                    Ok(_) => None,
-                    Err(e) => Some(Err(e)),
                 }
-            });
+            }
 
-        Ok(Box::pin(stream))
+            let tail = buffer.trim();
+            if !tail.is_empty() {
+                match serde_json::from_str::<Value>(tail) {
+                    Ok(value) => yield Ok(value),
+                    Err(error) => yield Err(format!("INVALID_NDJSON: {}", error)),
+                }
+            }
+        })
     }
 }
