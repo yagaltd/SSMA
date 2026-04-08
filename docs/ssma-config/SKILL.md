@@ -33,12 +33,18 @@ All config is loaded from environment variables in `config.rs` → `Config::from
 |----------|---------|-------------|
 | `SSMA_AUTH_JWT_SECRET` | ⚠️ insecure | JWT signing secret (**MUST** set in prod) |
 | `SSMA_AUTH_COOKIE` | `ssma_session` | Session cookie name |
+| `SSMA_REFRESH_COOKIE` | `ssma_refresh` | Refresh cookie name |
 | `SSMA_ANON_COOKIE` | `ssma_anon` | Anonymous session cookie name |
 | `SSMA_JWT_ISSUER` | `ssma-auth-service` | JWT issuer claim |
 | `SSMA_JWT_AUDIENCE` | `csma-clients` | JWT audience claim |
 | `SSMA_ACCESS_TTL_MS` | `900000` | JWT lifetime (15 min) |
 | `SSMA_AUTH_COOKIE_SECURE` | `true` | Set `Secure` flag on cookies |
 | `SSMA_AUTH_COOKIE_SAMESITE` | `Lax` | Cookie `SameSite` mode |
+| `SSMA_AUTH_REFRESH_ENABLED` | `true` | Enable refresh token flow |
+| `SSMA_REFRESH_TTL_MS` | `2592000000` | Refresh token lifetime (30 days) |
+| `SSMA_AUTH_REQUIRE_EMAIL_VERIFICATION` | `false` | Require verified email before login |
+| `SSMA_EMAIL_VERIFY_TTL_MS` | `86400000` | Email verification token lifetime (24h) |
+| `SSMA_PASSWORD_RESET_TTL_MS` | `3600000` | Password reset token lifetime (1h) |
 
 ### CORS
 

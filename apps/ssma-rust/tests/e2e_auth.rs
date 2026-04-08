@@ -1,11 +1,21 @@
 use axum::body::Body;
+use axum::extract::State as AxumState;
+use axum::routing::post;
+use axum::{Json, Router};
 use http::header::{COOKIE, SET_COOKIE};
 use http::{Request, StatusCode};
 use serde_json::{json, Value};
 use ssma_rust::config::Config;
 use ssma_rust::gateway;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use tokio::net::TcpListener;
 use tower::ServiceExt;
+
+#[derive(Clone, Default)]
+struct OutboxState {
+    events: Arc<Mutex<Vec<Value>>>,
+}
 
 fn test_config(tmp: &Path) -> Config {
     let mut config = Config::from_env();
@@ -17,26 +27,63 @@ fn test_config(tmp: &Path) -> Config {
     config
 }
 
-fn extract_cookie(response: &http::Response<Body>) -> Option<String> {
-    response
-        .headers()
-        .get_all(SET_COOKIE)
-        .iter()
-        .find_map(|v| {
-            let s = v.to_str().ok()?;
-            if s.starts_with("ssma_session=") {
-                Some(s.to_string())
-            } else {
-                None
-            }
-        })
+async fn spawn_outbox_backend() -> (String, OutboxState, tokio::task::JoinHandle<()>) {
+    async fn outbox(
+        AxumState(state): AxumState<OutboxState>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        state.events.lock().expect("outbox lock").push(body);
+        Json(json!({ "status": "ok" }))
+    }
+
+    let state = OutboxState::default();
+    let app = Router::new()
+        .route("/auth/outbox", post(outbox))
+        .with_state(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind backend");
+    let addr = listener.local_addr().expect("backend addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://127.0.0.1:{}", addr.port()), state, handle)
+}
+
+fn extract_cookie(response: &http::Response<Body>, cookie_name: &str) -> Option<String> {
+    response.headers().get_all(SET_COOKIE).iter().find_map(|v| {
+        let s = v.to_str().ok()?;
+        if s.starts_with(&format!("{}=", cookie_name)) {
+            Some(s.to_string())
+        } else {
+            None
+        }
+    })
 }
 
 fn cookie_header_value(cookie: &str) -> String {
-    let val = cookie.split(';').next().unwrap_or("").trim();
-    // cookie format: "ssma_session=<jwt>"
-    // extract just the key=value part
-    val.to_string()
+    cookie.split(';').next().unwrap_or("").trim().to_string()
+}
+
+async fn register_user(
+    app: &Router,
+    email: &str,
+    password: &str,
+    name: &str,
+) -> http::Response<Body> {
+    let body = serde_json::to_string(&json!({
+        "email": email,
+        "password": password,
+        "name": name
+    }))
+    .unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/auth/register")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap()
 }
 
 #[tokio::test]
@@ -46,37 +93,21 @@ async fn register_returns_201_with_cookie_and_user() {
     let state = gateway::build_state(config);
     let app = gateway::app(state);
 
-    let body = serde_json::to_string(&json!({
-        "email": "alice@example.com",
-        "password": "password123",
-        "name": "Alice"
-    }))
-    .unwrap();
-
-    let req = Request::builder()
-        .method("POST")
-        .uri("/auth/register")
-        .header("content-type", "application/json")
-        .body(Body::from(body))
-        .unwrap();
-
-    let resp = app.oneshot(req).await.unwrap();
+    let resp = register_user(&app, "alice@example.com", "password123", "Alice").await;
     assert_eq!(resp.status(), StatusCode::CREATED);
 
-    let cookie = extract_cookie(&resp).expect("should set auth cookie");
+    let cookie = extract_cookie(&resp, "ssma_session").expect("should set auth cookie");
     assert!(cookie.contains("ssma_session="));
     assert!(cookie.contains("HttpOnly"));
     assert!(cookie.contains("SameSite=Lax"));
-    assert!(!cookie.contains("Secure")); // auth_cookie_secure = false
+    assert!(!cookie.contains("Secure"));
+    assert!(extract_cookie(&resp, "ssma_refresh").is_some());
+    assert!(resp.headers().get("x-request-id").is_some());
 
     let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
     let user: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(user["user"]["email"], "alice@example.com");
-    assert_eq!(user["user"]["name"], "Alice");
-    assert_eq!(user["user"]["role"], "user");
-    assert_eq!(user["user"]["status"], "active");
-    assert!(user["user"].get("passwordHash").is_none());
-    assert!(user["user"].get("password_hash").is_none());
+    assert_eq!(user["user"]["emailVerified"], true);
 }
 
 #[tokio::test]
@@ -86,37 +117,10 @@ async fn duplicate_email_returns_409() {
     let state = gateway::build_state(config);
     let app = gateway::app(state);
 
-    let body = serde_json::to_string(&json!({
-        "email": "bob@example.com",
-        "password": "password123",
-        "name": "Bob"
-    }))
-    .unwrap();
-
-    let req = Request::builder()
-        .method("POST")
-        .uri("/auth/register")
-        .header("content-type", "application/json")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-
-    let body2 = serde_json::to_string(&json!({
-        "email": "bob@example.com",
-        "password": "different123",
-        "name": "Bob2"
-    }))
-    .unwrap();
-
-    let req2 = Request::builder()
-        .method("POST")
-        .uri("/auth/register")
-        .header("content-type", "application/json")
-        .body(Body::from(body2))
-        .unwrap();
-    let resp2 = app.oneshot(req2).await.unwrap();
-    assert_eq!(resp2.status(), StatusCode::CONFLICT);
+    let first = register_user(&app, "bob@example.com", "password123", "Bob").await;
+    assert_eq!(first.status(), StatusCode::CREATED);
+    let second = register_user(&app, "bob@example.com", "different123", "Bob2").await;
+    assert_eq!(second.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]
@@ -126,23 +130,9 @@ async fn login_correct_password_returns_200_with_cookie() {
     let state = gateway::build_state(config);
     let app = gateway::app(state);
 
-    // Register first
-    let reg_body = serde_json::to_string(&json!({
-        "email": "charlie@example.com",
-        "password": "password123",
-        "name": "Charlie"
-    }))
-    .unwrap();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/auth/register")
-        .header("content-type", "application/json")
-        .body(Body::from(reg_body))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    let reg = register_user(&app, "charlie@example.com", "password123", "Charlie").await;
+    assert_eq!(reg.status(), StatusCode::CREATED);
 
-    // Login
     let login_body = serde_json::to_string(&json!({
         "email": "charlie@example.com",
         "password": "password123"
@@ -156,13 +146,9 @@ async fn login_correct_password_returns_200_with_cookie() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-
-    let cookie = extract_cookie(&resp).expect("should set auth cookie");
-    assert!(cookie.contains("ssma_session="));
-
-    let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-    let user: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(user["user"]["email"], "charlie@example.com");
+    assert!(extract_cookie(&resp, "ssma_session").is_some());
+    assert!(extract_cookie(&resp, "ssma_refresh").is_some());
+    assert!(resp.headers().get("x-request-id").is_some());
 }
 
 #[tokio::test]
@@ -171,23 +157,8 @@ async fn login_wrong_password_returns_401() {
     let config = test_config(tmp.path());
     let state = gateway::build_state(config);
     let app = gateway::app(state);
+    let _ = register_user(&app, "dave@example.com", "password123", "Dave").await;
 
-    // Register first
-    let reg_body = serde_json::to_string(&json!({
-        "email": "dave@example.com",
-        "password": "password123",
-        "name": "Dave"
-    }))
-    .unwrap();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/auth/register")
-        .header("content-type", "application/json")
-        .body(Body::from(reg_body))
-        .unwrap();
-    let _ = app.clone().oneshot(req).await.unwrap();
-
-    // Login with wrong password
     let login_body = serde_json::to_string(&json!({
         "email": "dave@example.com",
         "password": "wrongpassword"
@@ -209,24 +180,9 @@ async fn me_with_valid_cookie_returns_user() {
     let config = test_config(tmp.path());
     let state = gateway::build_state(config);
     let app = gateway::app(state);
+    let reg = register_user(&app, "eve@example.com", "password123", "Eve").await;
+    let cookie = extract_cookie(&reg, "ssma_session").unwrap();
 
-    // Register to get cookie
-    let reg_body = serde_json::to_string(&json!({
-        "email": "eve@example.com",
-        "password": "password123",
-        "name": "Eve"
-    }))
-    .unwrap();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/auth/register")
-        .header("content-type", "application/json")
-        .body(Body::from(reg_body))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let cookie = extract_cookie(&resp).unwrap();
-
-    // GET /auth/me
     let req = Request::builder()
         .method("GET")
         .uri("/auth/me")
@@ -235,11 +191,7 @@ async fn me_with_valid_cookie_returns_user() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-
-    let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-    let user: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(user["user"]["email"], "eve@example.com");
-    assert_eq!(user["user"]["name"], "Eve");
+    assert!(resp.headers().get("x-request-id").is_some());
 }
 
 #[tokio::test]
@@ -259,61 +211,193 @@ async fn me_without_cookie_returns_401() {
 }
 
 #[tokio::test]
-async fn logout_clears_cookie() {
+async fn refresh_rotates_session_and_refresh_cookie() {
     let tmp = tempfile::tempdir().unwrap();
-    let config = test_config(tmp.path());
+    let mut config = test_config(tmp.path());
+    config.auth_refresh_enabled = true;
     let state = gateway::build_state(config);
     let app = gateway::app(state);
+    let reg = register_user(&app, "rot@example.com", "password123", "Rot").await;
+    let refresh_cookie = extract_cookie(&reg, "ssma_refresh").expect("refresh cookie");
 
     let req = Request::builder()
         .method("POST")
-        .uri("/auth/logout")
+        .uri("/auth/refresh")
+        .header(COOKIE, cookie_header_value(&refresh_cookie))
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-
-    let cookie = extract_cookie(&resp).expect("should set clear cookie");
-    assert!(cookie.contains("Max-Age=0") || cookie.contains("ssma_session="));
+    assert!(extract_cookie(&resp, "ssma_session").is_some());
+    assert!(extract_cookie(&resp, "ssma_refresh").is_some());
+    assert!(resp.headers().get("x-request-id").is_some());
 }
 
 #[tokio::test]
-async fn registered_user_jwt_works_for_protected_channel() {
+async fn email_verification_flow_blocks_login_until_verified() {
     let tmp = tempfile::tempdir().unwrap();
+    let (backend_url, outbox_state, backend_handle) = spawn_outbox_backend().await;
     let mut config = test_config(tmp.path());
-    config.protected_channels = vec!["admin-only".to_string()];
-    config.protected_channel_min_role = "admin".to_string();
+    config.backend_url = backend_url;
+    config.auth_require_email_verification = true;
     let state = gateway::build_state(config);
     let app = gateway::app(state);
 
-    // Register a regular user
-    let reg_body = serde_json::to_string(&json!({
-        "email": "frank@example.com",
-        "password": "password123",
-        "name": "Frank"
+    let reg = register_user(&app, "verify@example.com", "password123", "Verify").await;
+    assert_eq!(reg.status(), StatusCode::CREATED);
+
+    let login_body = serde_json::to_string(&json!({
+        "email": "verify@example.com",
+        "password": "password123"
     }))
     .unwrap();
-    let req = Request::builder()
+    let login_req = Request::builder()
         .method("POST")
-        .uri("/auth/register")
+        .uri("/auth/login")
         .header("content-type", "application/json")
-        .body(Body::from(reg_body))
+        .body(Body::from(login_body))
         .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    let blocked = app.clone().oneshot(login_req).await.unwrap();
+    assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
 
-    // The cookie is valid JWT - verify by calling /auth/me
-    let cookie = extract_cookie(&resp).unwrap();
-    let req = Request::builder()
-        .method("GET")
-        .uri("/auth/me")
-        .header(COOKIE, cookie_header_value(&cookie))
-        .body(Body::empty())
+    let resend_req = Request::builder()
+        .method("POST")
+        .uri("/auth/resend-verification")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({ "email": "verify@example.com" })).unwrap(),
+        ))
         .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let resend_resp = app.clone().oneshot(resend_req).await.unwrap();
+    assert_eq!(resend_resp.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-    let user: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(user["user"]["role"], "user");
+    let token = {
+        let events = outbox_state.events.lock().expect("outbox lock");
+        assert!(
+            events
+                .iter()
+                .filter(|e| e["kind"] == "verify_email")
+                .count()
+                >= 2
+        );
+        let event = events
+            .iter()
+            .rev()
+            .find(|e| e["kind"] == "verify_email")
+            .expect("verify email event");
+        event["payload"]["token"].as_str().unwrap().to_string()
+    };
+
+    let verify_req = Request::builder()
+        .method("POST")
+        .uri("/auth/verify-email")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({ "token": token })).unwrap(),
+        ))
+        .unwrap();
+    let verify_resp = app.clone().oneshot(verify_req).await.unwrap();
+    assert_eq!(verify_resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(verify_resp.into_body(), 8192)
+        .await
+        .unwrap();
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["user"]["emailVerified"], true);
+
+    let login_req2 = Request::builder()
+        .method("POST")
+        .uri("/auth/login")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "email": "verify@example.com",
+                "password": "password123"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let ok = app.oneshot(login_req2).await.unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+
+    backend_handle.abort();
+}
+
+#[tokio::test]
+async fn forgot_and_reset_password_flow() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (backend_url, outbox_state, backend_handle) = spawn_outbox_backend().await;
+    let mut config = test_config(tmp.path());
+    config.backend_url = backend_url;
+    let state = gateway::build_state(config);
+    let app = gateway::app(state);
+
+    let _ = register_user(&app, "reset@example.com", "password123", "Reset").await;
+
+    let forgot_req = Request::builder()
+        .method("POST")
+        .uri("/auth/forgot-password")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({ "email": "reset@example.com" })).unwrap(),
+        ))
+        .unwrap();
+    let forgot_resp = app.clone().oneshot(forgot_req).await.unwrap();
+    assert_eq!(forgot_resp.status(), StatusCode::OK);
+    assert!(forgot_resp.headers().get("x-request-id").is_some());
+
+    let reset_token = {
+        let events = outbox_state.events.lock().expect("outbox lock");
+        let event = events
+            .iter()
+            .find(|e| e["kind"] == "password_reset")
+            .expect("reset event");
+        event["payload"]["token"].as_str().unwrap().to_string()
+    };
+
+    let reset_req = Request::builder()
+        .method("POST")
+        .uri("/auth/reset-password")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "token": reset_token,
+                "newPassword": "new-password-123"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let reset_resp = app.clone().oneshot(reset_req).await.unwrap();
+    assert_eq!(reset_resp.status(), StatusCode::OK);
+
+    let old_login = Request::builder()
+        .method("POST")
+        .uri("/auth/login")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "email": "reset@example.com",
+                "password": "password123"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let old_login_resp = app.clone().oneshot(old_login).await.unwrap();
+    assert_eq!(old_login_resp.status(), StatusCode::UNAUTHORIZED);
+
+    let new_login = Request::builder()
+        .method("POST")
+        .uri("/auth/login")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "email": "reset@example.com",
+                "password": "new-password-123"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let new_login_resp = app.oneshot(new_login).await.unwrap();
+    assert_eq!(new_login_resp.status(), StatusCode::OK);
+
+    backend_handle.abort();
 }

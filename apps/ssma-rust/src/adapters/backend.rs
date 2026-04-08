@@ -82,7 +82,8 @@ impl BackendHttpClient {
         payload: Value,
         context: &BackendContext,
     ) -> Result<Value, reqwest::Error> {
-        self.query_with_request_id(name, payload, context, None).await
+        self.query_with_request_id(name, payload, context, None)
+            .await
     }
 
     pub async fn query_with_request_id(
@@ -177,6 +178,34 @@ impl BackendHttpClient {
         .await
     }
 
+    pub async fn auth_outbox_event(
+        &self,
+        kind: &str,
+        email: &str,
+        payload: Value,
+        context: &BackendContext,
+        request_id: Option<&str>,
+    ) -> Result<Value, reqwest::Error> {
+        if !self.is_configured() {
+            return Ok(serde_json::json!({
+                "status": "ok",
+                "data": Value::Null,
+                "backend": "unconfigured"
+            }));
+        }
+        self.post_json_with_request_id(
+            "/auth/outbox",
+            serde_json::json!({
+                "kind": kind,
+                "email": email,
+                "payload": payload,
+                "context": context
+            }),
+            request_id,
+        )
+        .await
+    }
+
     pub async fn health(&self, context: &BackendContext) -> Result<Value, reqwest::Error> {
         if !self.is_configured() {
             return Ok(serde_json::json!({ "status": "ok", "backend": "unconfigured" }));
@@ -221,7 +250,8 @@ impl BackendHttpClient {
         payload: Value,
         context: &BackendContext,
     ) -> Result<BackendStream, reqwest::Error> {
-        self.query_stream_with_request_id(name, payload, context, None).await
+        self.query_stream_with_request_id(name, payload, context, None)
+            .await
     }
 
     pub async fn query_stream_with_request_id(
@@ -235,11 +265,7 @@ impl BackendHttpClient {
             let stream = futures_util::stream::empty();
             return Ok(Box::pin(stream));
         }
-        let url = format!(
-            "{}/query/{}",
-            self.base_url,
-            urlencoding::encode(name)
-        );
+        let url = format!("{}/query/{}", self.base_url, urlencoding::encode(name));
         let mut request = self
             .client
             .post(&url)

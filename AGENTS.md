@@ -41,9 +41,10 @@ apps/ssma-rust/src/
 - `channel.snapshot`, `channel.replay`, `channel.invalidate` preserve `params`
 - `channel.invalidate` targets one `channel`, not `channels[]`
 - Auth endpoints return `{ status: "ok", user: {...} }` envelope
+- Auth endpoints emit `x-request-id`; refresh/reset/verify flows are first-class routes
 - OIDC bridge endpoints issue the same `ssma_session` cookie as local auth
 - `/query/:name` = JSON, `/query/:name/stream` = SSE NDJSON
-- `/forms/submit` applies honeypot/captcha hooks and forwards accepted payloads to backend `/forms/submit`
+- `/forms/submit` accepts JSON, urlencoded, and multipart field forms; applies honeypot/captcha/csrf hooks and forwards accepted payloads to backend `/forms/submit`
 - `/webhooks/:provider` applies verification/idempotency and forwards accepted events to backend `/webhooks/ingest`
 - Shutdown must stop sockets, listeners, reconnect loops
 

@@ -18,6 +18,7 @@ SSMA calls your backend at these routes:
 | `/subscribe` | POST | Initialize channel subscription |
 | `/forms/submit` | POST | Process accepted form submissions |
 | `/webhooks/ingest` | POST | Process verified/idempotent webhook events |
+| `/auth/outbox` | POST | Deliver auth lifecycle messages (email verification, password reset) |
 | `/health` | POST | Backend health check |
 
 Base URL: `SSMA_BACKEND_URL`
@@ -218,6 +219,45 @@ SSMA forwards these as SSE events to the client at `/query/:name/stream`.
 }
 ```
 
+## `POST /auth/outbox`
+
+Gateway emits auth-delivery events to backend adapter:
+
+### Request
+
+```json
+{
+  "kind": "verify_email",
+  "email": "user@example.com",
+  "payload": {
+    "token": "opaque-token",
+    "expiresAt": 1710000000000,
+    "userId": "uuid",
+    "name": "User"
+  },
+  "context": {
+    "site": "default",
+    "actorKey": "user:uuid",
+    "connectionId": null,
+    "ip": "203.0.113.10",
+    "userAgent": "Mozilla/5.0",
+    "user": { "id": "uuid", "role": "user" }
+  }
+}
+```
+
+`kind` values currently used:
+- `verify_email`
+- `password_reset`
+
+### Response
+
+```json
+{
+  "status": "ok"
+}
+```
+
 ## `POST /health`
 
 ### Request
@@ -323,4 +363,5 @@ When `SSMA_BACKEND_URL` is empty:
 - `subscribe` → returns `{ status: "ok", snapshot: [], cursor: 0 }`
 - `submitForm` → returns `{ status: "ok", data: null, backend: "unconfigured" }`
 - `ingestWebhook` → returns `{ status: "ok", data: null, backend: "unconfigured" }`
+- `authOutboxEvent` → returns `{ status: "ok", data: null, backend: "unconfigured" }`
 - `health` → returns `{ status: "ok", backend: "unconfigured" }`

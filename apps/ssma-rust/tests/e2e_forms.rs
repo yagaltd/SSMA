@@ -390,7 +390,39 @@ async fn forms_csrf_double_submit_enforced_for_urlencoded() -> Result<()> {
         .send()
         .await?;
     assert_eq!(ok.status(), StatusCode::OK);
-    assert_eq!(backend_state.submitted.lock().expect("backend lock").len(), 1);
+    assert_eq!(
+        backend_state.submitted.lock().expect("backend lock").len(),
+        1
+    );
+
+    gateway_handle.abort();
+    backend_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn forms_multipart_fields_supported() -> Result<()> {
+    let (backend_url, backend_state, backend_handle) = spawn_backend().await?;
+    let tmp = tempfile::tempdir()?;
+    let config = test_config(tmp.path(), backend_url);
+    let (gateway_base, gateway_handle) = spawn_gateway(config).await?;
+
+    let form = reqwest::multipart::Form::new()
+        .text("formName", "contact")
+        .text("email", "multipart@example.com")
+        .text("message", "hello-multipart");
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/forms/submit", gateway_base))
+        .multipart(form)
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let submitted = backend_state.submitted.lock().expect("backend lock");
+    assert_eq!(submitted.len(), 1);
+    assert_eq!(submitted[0]["payload"]["email"], "multipart@example.com");
+    assert_eq!(submitted[0]["payload"]["message"], "hello-multipart");
 
     gateway_handle.abort();
     backend_handle.abort();

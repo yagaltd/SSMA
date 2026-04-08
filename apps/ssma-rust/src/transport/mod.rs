@@ -4,21 +4,15 @@ pub mod internal;
 pub mod sse;
 pub mod ws;
 
+use crate::adapters::backend::{BackendHttpClient, BackendUser};
 use crate::config::Config;
 use crate::domain::runtime::{now_millis, now_secs, IntentRecord, IntentStore};
-use crate::adapters::backend::{BackendHttpClient, BackendUser};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::header::SET_COOKIE;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use tower::ServiceBuilder;
-use tower_http::cors::{Any, CorsLayer};
-use tower_http::timeout::TimeoutLayer;
-use tower_http::compression::CompressionLayer;
-use tower_http::trace::TraceLayer;
-use std::time::Duration;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -27,7 +21,13 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::broadcast;
+use tower::ServiceBuilder;
+use tower_http::compression::CompressionLayer;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::timeout::TimeoutLayer;
+use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 // --- Types ---
@@ -236,8 +236,13 @@ pub fn build_state(config: Config) -> Arc<AppState> {
             }
         }
     }
-    let store = IntentStore::new(config.intent_store_path.clone(), config.replay_window_ms, config.optimistic_max_entries);
-    let backend = BackendHttpClient::with_timeout(config.backend_url.clone(), config.backend_timeout_ms);
+    let store = IntentStore::new(
+        config.intent_store_path.clone(),
+        config.replay_window_ms,
+        config.optimistic_max_entries,
+    );
+    let backend =
+        BackendHttpClient::with_timeout(config.backend_url.clone(), config.backend_timeout_ms);
     let (events, _) = broadcast::channel(1024);
     let user_store = Arc::new(auth::UserStore::new(config.user_store_path.clone()));
     Arc::new(AppState {
@@ -271,11 +276,19 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/query/:name", post(public_query))
         .route("/query/:name/stream", post(public_query_stream))
         .route("/forms/submit", post(crate::features::forms::submit_form))
-        .route("/webhooks/:provider", post(crate::features::webhooks::webhook_ingest))
+        .route(
+            "/webhooks/:provider",
+            post(crate::features::webhooks::webhook_ingest),
+        )
         .route("/auth/register", post(auth::register))
         .route("/auth/login", post(auth::login))
+        .route("/auth/refresh", post(auth::refresh))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
+        .route("/auth/forgot-password", post(auth::forgot_password))
+        .route("/auth/reset-password", post(auth::reset_password))
+        .route("/auth/verify-email", post(auth::verify_email))
+        .route("/auth/resend-verification", post(auth::resend_verification))
         .route("/auth/oidc/start", get(auth::oidc_start))
         .route("/auth/oidc/callback", get(auth::oidc_callback))
         .route("/logs/batch", post(crate::features::logs::logs_batch))
@@ -295,7 +308,10 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         .route("/admin/optimistic/channels", get(admin::admin_channels))
         .route("/admin/optimistic/intents", get(admin::admin_intents))
-        .route("/internal/backend/events", post(internal::backend_events_ingest))
+        .route(
+            "/internal/backend/events",
+            post(internal::backend_events_ingest),
+        )
         .layer(DefaultBodyLimit::max(
             state
                 .config
@@ -315,7 +331,10 @@ pub fn app(state: Arc<AppState>) -> Router {
             "/media/assets/:asset_id/content",
             get(crate::features::media::get_asset_content),
         )
-        .route("/rtc/sessions", post(crate::features::rtc::create_rtc_session))
+        .route(
+            "/rtc/sessions",
+            post(crate::features::rtc::create_rtc_session),
+        )
         .route(
             "/rtc/sessions/:session_id/signals",
             post(crate::features::rtc::post_rtc_signal),
@@ -328,30 +347,31 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route(
             "/internal/assets/:asset_id/content",
             get(internal::get_internal_asset_content),
-        ).layer(DefaultBodyLimit::max(
+        )
+        .layer(DefaultBodyLimit::max(
             state.config.media_max_upload_bytes as usize,
         ));
 
     // Routes with short timeout
     let short_timeout_routes = small_body_routes
         .merge(media_routes)
-        .layer(
-            ServiceBuilder::new()
-                .layer(cors_layer(&state.config.allowed_origins)),
-        )
+        .layer(ServiceBuilder::new().layer(cors_layer(&state.config.allowed_origins)))
         .layer(TraceLayer::new_for_http())
         .layer(CompressionLayer::new())
-        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, short_timeout))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            short_timeout,
+        ))
         .with_state(state.clone());
 
     // Routes with long timeout for WebSocket and SSE upgrade
     let long_timeout_routes = Router::new()
         .route("/optimistic/ws", get(ws::ws_upgrade))
         .route("/optimistic/events", get(sse::sse_events))
-        .layer(
-            ServiceBuilder::new()
-                .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, long_timeout)),
-        )
+        .layer(ServiceBuilder::new().layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            long_timeout,
+        )))
         .with_state(state);
 
     // Combine all routes
@@ -429,17 +449,28 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
 async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Check backend connectivity if configured
     let backend_status = if state.backend.is_configured() {
-        match state.backend.health(&crate::adapters::backend::BackendContext {
-            site: "internal".to_string(),
-            actor_key: None,
-            connection_id: None,
-            ip: None,
-            user_agent: None,
-            user: None,
-        }).await {
+        match state
+            .backend
+            .health(&crate::adapters::backend::BackendContext {
+                site: "internal".to_string(),
+                actor_key: None,
+                connection_id: None,
+                ip: None,
+                user_agent: None,
+                user: None,
+            })
+            .await
+        {
             Ok(health) => {
-                let status = health.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-                if status == "ok" { "healthy" } else { "degraded" }
+                let status = health
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                if status == "ok" {
+                    "healthy"
+                } else {
+                    "degraded"
+                }
             }
             Err(_) => "unreachable",
         }
@@ -454,13 +485,16 @@ async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         StatusCode::SERVICE_UNAVAILABLE
     };
 
-    (status_code, Json(json!({
-        "status": if is_ready { "ok" } else { "not_ready" },
-        "service": "ssma-rust",
-        "subprotocol": state.config.subprotocol,
-        "cursor": state.store.latest_cursor(),
-        "backend": backend_status,
-    })))
+    (
+        status_code,
+        Json(json!({
+            "status": if is_ready { "ok" } else { "not_ready" },
+            "service": "ssma-rust",
+            "subprotocol": state.config.subprotocol,
+            "cursor": state.store.latest_cursor(),
+            "backend": backend_status,
+        })),
+    )
 }
 
 async fn metrics(State(state): State<Arc<AppState>>) -> Json<Value> {
@@ -700,7 +734,10 @@ pub(crate) fn resolve_actor_from_headers(
     })
 }
 
-pub(crate) fn resolve_user_from_headers(headers: &HeaderMap, config: &Config) -> Option<ResolvedUser> {
+pub(crate) fn resolve_user_from_headers(
+    headers: &HeaderMap,
+    config: &Config,
+) -> Option<ResolvedUser> {
     let token = cookie_value(headers, &config.auth_cookie_name)?;
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_aud = false;
@@ -800,7 +837,12 @@ pub(crate) fn purge_expired_runtime_state(state: &Arc<AppState>) {
     }
 }
 
-pub(crate) fn consume_global_rate_limit(state: &Arc<AppState>, key: String, max: u32, window_ms: i64) -> bool {
+pub(crate) fn consume_global_rate_limit(
+    state: &Arc<AppState>,
+    key: String,
+    max: u32,
+    window_ms: i64,
+) -> bool {
     let now = now_millis();
     let mut buckets = state.global_limits.lock().expect("global limit lock");
     let bucket = buckets.entry(key).or_insert(RateBucket {
@@ -846,7 +888,11 @@ pub(crate) fn role_rank(role: &str) -> u8 {
     }
 }
 
-pub(crate) fn can_access_channel(state: &Arc<AppState>, channel: &str, context: &ConnectionContext) -> bool {
+pub(crate) fn can_access_channel(
+    state: &Arc<AppState>,
+    channel: &str,
+    context: &ConnectionContext,
+) -> bool {
     if let Some(session_id) = channel.strip_prefix("rtc.session.") {
         let Some(actor_key) = &context.actor_key else {
             return false;
@@ -1252,7 +1298,10 @@ mod tests {
         let meta = json!({});
         let normalized = normalize_intent_meta(&meta);
         // Should add reasons including pending, replay, and channel:global
-        let reasons = normalized.get("reasons").and_then(|v| v.as_array()).unwrap();
+        let reasons = normalized
+            .get("reasons")
+            .and_then(|v| v.as_array())
+            .unwrap();
         let reason_strs: Vec<&str> = reasons.iter().filter_map(|r| r.as_str()).collect();
         assert!(reason_strs.contains(&"pending"));
         assert!(reason_strs.contains(&"replay"));
@@ -1263,9 +1312,17 @@ mod tests {
     fn normalize_intent_meta_preserves_existing_channels() {
         let meta = json!({"channels": ["custom-channel"]});
         let normalized = normalize_intent_meta(&meta);
-        let channels = normalized.get("channels").and_then(|v| v.as_array()).unwrap();
-        assert!(channels.iter().any(|c| c.as_str() == Some("custom-channel")));
-        let reasons = normalized.get("reasons").and_then(|v| v.as_array()).unwrap();
+        let channels = normalized
+            .get("channels")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert!(channels
+            .iter()
+            .any(|c| c.as_str() == Some("custom-channel")));
+        let reasons = normalized
+            .get("reasons")
+            .and_then(|v| v.as_array())
+            .unwrap();
         let reason_strs: Vec<&str> = reasons.iter().filter_map(|r| r.as_str()).collect();
         assert!(reason_strs.contains(&"channel:custom-channel"));
     }

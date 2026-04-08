@@ -33,7 +33,7 @@ apps/ssma-rust/
 │   └── features/
 │       └── media.rs     # mod tests {} — MIME type detection
 ├── tests/
-│   ├── e2e_auth.rs          # Register, login, logout, /me
+│   ├── e2e_auth.rs          # Register/login/logout/me + refresh/reset/verify flows
 │   ├── e2e_admin.rs         # Admin endpoints (staff+)
 │   ├── e2e_cors.rs          # CORS headers
 │   ├── e2e_health.rs        # Health endpoint

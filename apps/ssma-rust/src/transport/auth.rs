@@ -1,17 +1,15 @@
-use crate::gateway::{
-    api_error, cookie_value, ApiResult, AppState,
-};
+use crate::gateway::{api_error, cookie_value, ApiResult, AppState};
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::PasswordHasher;
+use argon2::password_hash::PasswordVerifier;
+use argon2::password_hash::SaltString;
+use argon2::Argon2;
+use argon2::PasswordHash;
 use axum::extract::State;
 use axum::http::header::SET_COOKIE;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::SaltString;
-use argon2::password_hash::PasswordHasher;
-use argon2::password_hash::PasswordVerifier;
-use argon2::Argon2;
-use argon2::PasswordHash;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use oauth2::basic::BasicClient;
 use oauth2::reqwest::async_http_client;
@@ -21,6 +19,7 @@ use oauth2::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -37,15 +36,33 @@ pub(crate) struct UserRecord {
     pub(crate) name: String,
     pub(crate) role: String,
     pub(crate) status: String,
+    #[serde(default = "default_email_verified")]
+    pub(crate) email_verified: bool,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
     pub(crate) last_login_at: Option<i64>,
+    #[serde(default)]
+    pub(crate) refresh_token_hash: Option<String>,
+    #[serde(default)]
+    pub(crate) refresh_token_expires_at: Option<i64>,
+    #[serde(default)]
+    pub(crate) verification_token_hash: Option<String>,
+    #[serde(default)]
+    pub(crate) verification_token_expires_at: Option<i64>,
+    #[serde(default)]
+    pub(crate) reset_token_hash: Option<String>,
+    #[serde(default)]
+    pub(crate) reset_token_expires_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedUsers {
     version: u8,
     users: Vec<UserRecord>,
+}
+
+fn default_email_verified() -> bool {
+    true
 }
 
 pub(crate) struct UserStore {
@@ -128,6 +145,166 @@ impl UserStore {
         }
         self.persist()
     }
+
+    pub(crate) fn set_refresh_token(
+        &self,
+        id: &str,
+        token_hash: String,
+        expires_at: i64,
+    ) -> Result<(), String> {
+        {
+            let mut data = self.state.lock().map_err(|e| e.to_string())?;
+            let now = crate::runtime::now_millis();
+            if let Some(user) = data.users.iter_mut().find(|u| u.id == id) {
+                user.refresh_token_hash = Some(token_hash);
+                user.refresh_token_expires_at = Some(expires_at);
+                user.updated_at = now;
+            }
+        }
+        self.persist()
+    }
+
+    pub(crate) fn clear_refresh_token(&self, id: &str) -> Result<(), String> {
+        {
+            let mut data = self.state.lock().map_err(|e| e.to_string())?;
+            let now = crate::runtime::now_millis();
+            if let Some(user) = data.users.iter_mut().find(|u| u.id == id) {
+                user.refresh_token_hash = None;
+                user.refresh_token_expires_at = None;
+                user.updated_at = now;
+            }
+        }
+        self.persist()
+    }
+
+    pub(crate) fn find_by_refresh_token_hash(&self, token_hash: &str) -> Option<UserRecord> {
+        let now = crate::runtime::now_millis();
+        let data = self.state.lock().ok()?;
+        data.users
+            .iter()
+            .find(|u| {
+                u.refresh_token_hash.as_deref() == Some(token_hash)
+                    && u.refresh_token_expires_at.unwrap_or_default() > now
+            })
+            .cloned()
+    }
+
+    pub(crate) fn set_verification_token(
+        &self,
+        id: &str,
+        token_hash: String,
+        expires_at: i64,
+    ) -> Result<(), String> {
+        {
+            let mut data = self.state.lock().map_err(|e| e.to_string())?;
+            let now = crate::runtime::now_millis();
+            if let Some(user) = data.users.iter_mut().find(|u| u.id == id) {
+                user.email_verified = false;
+                user.verification_token_hash = Some(token_hash);
+                user.verification_token_expires_at = Some(expires_at);
+                user.updated_at = now;
+            }
+        }
+        self.persist()
+    }
+
+    pub(crate) fn mark_email_verified_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<UserRecord>, String> {
+        let mut found = None;
+        {
+            let mut data = self.state.lock().map_err(|e| e.to_string())?;
+            let now = crate::runtime::now_millis();
+            if let Some(user) = data.users.iter_mut().find(|u| {
+                u.verification_token_hash.as_deref() == Some(token_hash)
+                    && u.verification_token_expires_at.unwrap_or_default() > now
+            }) {
+                user.email_verified = true;
+                if user.status == "pending_verification" {
+                    user.status = "active".to_string();
+                }
+                user.verification_token_hash = None;
+                user.verification_token_expires_at = None;
+                user.updated_at = now;
+                found = Some(user.clone());
+            }
+        }
+        self.persist()?;
+        Ok(found)
+    }
+
+    pub(crate) fn issue_reset_token_by_email(
+        &self,
+        email: &str,
+        token_hash: String,
+        expires_at: i64,
+    ) -> Result<Option<UserRecord>, String> {
+        let mut found = None;
+        {
+            let mut data = self.state.lock().map_err(|e| e.to_string())?;
+            let now = crate::runtime::now_millis();
+            if let Some(user) = data.users.iter_mut().find(|u| u.email == email) {
+                user.reset_token_hash = Some(token_hash);
+                user.reset_token_expires_at = Some(expires_at);
+                user.updated_at = now;
+                found = Some(user.clone());
+            }
+        }
+        self.persist()?;
+        Ok(found)
+    }
+
+    pub(crate) fn reset_password_by_token_hash(
+        &self,
+        token_hash: &str,
+        next_password_hash: String,
+    ) -> Result<Option<UserRecord>, String> {
+        let mut found = None;
+        {
+            let mut data = self.state.lock().map_err(|e| e.to_string())?;
+            let now = crate::runtime::now_millis();
+            if let Some(user) = data.users.iter_mut().find(|u| {
+                u.reset_token_hash.as_deref() == Some(token_hash)
+                    && u.reset_token_expires_at.unwrap_or_default() > now
+            }) {
+                user.password_hash = next_password_hash;
+                user.reset_token_hash = None;
+                user.reset_token_expires_at = None;
+                user.refresh_token_hash = None;
+                user.refresh_token_expires_at = None;
+                user.updated_at = now;
+                found = Some(user.clone());
+            }
+        }
+        self.persist()?;
+        Ok(found)
+    }
+
+    pub(crate) fn issue_verification_token_by_email(
+        &self,
+        email: &str,
+        token_hash: String,
+        expires_at: i64,
+    ) -> Result<Option<UserRecord>, String> {
+        let mut found = None;
+        {
+            let mut data = self.state.lock().map_err(|e| e.to_string())?;
+            let now = crate::runtime::now_millis();
+            if let Some(user) = data
+                .users
+                .iter_mut()
+                .find(|u| u.email == email && !u.email_verified)
+            {
+                user.verification_token_hash = Some(token_hash);
+                user.verification_token_expires_at = Some(expires_at);
+                user.updated_at = now;
+                found = Some(user.clone());
+            }
+        }
+        self.persist()?;
+        Ok(found)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -159,6 +336,31 @@ pub(crate) struct LoginRequest {
 pub(crate) struct OidcCallbackQuery {
     code: String,
     state: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ForgotPasswordRequest {
+    email: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResetPasswordRequest {
+    token: String,
+    new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VerifyEmailRequest {
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResendVerificationRequest {
+    email: String,
 }
 
 fn hash_password(password: &str) -> Result<String, String> {
@@ -211,6 +413,19 @@ fn auth_cookie_value(jwt: &str, config: &crate::config::Config) -> String {
     )
 }
 
+fn refresh_cookie_value(token: &str, config: &crate::config::Config) -> String {
+    let secure = if config.auth_cookie_secure {
+        "; Secure"
+    } else {
+        ""
+    };
+    let same_site = format!("; SameSite={}", config.auth_cookie_same_site);
+    format!(
+        "{}={}; Path=/; HttpOnly{}{}",
+        config.refresh_cookie_name, token, same_site, secure
+    )
+}
+
 fn clear_cookie_value(config: &crate::config::Config) -> String {
     let secure = if config.auth_cookie_secure {
         "; Secure"
@@ -224,6 +439,57 @@ fn clear_cookie_value(config: &crate::config::Config) -> String {
     )
 }
 
+fn clear_refresh_cookie_value(config: &crate::config::Config) -> String {
+    let secure = if config.auth_cookie_secure {
+        "; Secure"
+    } else {
+        ""
+    };
+    let same_site = format!("; SameSite={}", config.auth_cookie_same_site);
+    format!(
+        "{}=; Path=/; HttpOnly{}{}; Max-Age=0",
+        config.refresh_cookie_name, same_site, secure
+    )
+}
+
+fn hash_token(secret: &str, token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(secret.as_bytes());
+    hasher.update(b":");
+    hasher.update(token.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn random_token() -> String {
+    format!("{}.{}", Uuid::new_v4(), Uuid::new_v4())
+}
+
+fn set_request_id_header(headers: &mut HeaderMap, request_id: &str) {
+    if let Ok(value) = HeaderValue::from_str(request_id) {
+        headers.insert("x-request-id", value);
+    }
+}
+
+fn issue_refresh_cookie_for_user(
+    state: &Arc<AppState>,
+    user: &UserRecord,
+    headers: &mut HeaderMap,
+) -> Result<(), String> {
+    if !state.config.auth_refresh_enabled {
+        return Ok(());
+    }
+    let refresh_token = random_token();
+    let refresh_hash = hash_token(&state.config.auth_jwt_secret, &refresh_token);
+    let expires_at = crate::runtime::now_millis() + state.config.refresh_ttl_ms as i64;
+    state
+        .user_store
+        .set_refresh_token(&user.id, refresh_hash, expires_at)?;
+    if let Ok(val) = HeaderValue::from_str(&refresh_cookie_value(&refresh_token, &state.config)) {
+        headers.append(SET_COOKIE, val);
+    }
+    Ok(())
+}
+
 fn user_to_json(user: &UserRecord) -> Value {
     json!({
         "id": user.id,
@@ -231,6 +497,7 @@ fn user_to_json(user: &UserRecord) -> Value {
         "name": user.name,
         "role": user.role,
         "status": user.status,
+        "emailVerified": user.email_verified,
         "createdAt": user.created_at,
         "updatedAt": user.updated_at,
         "lastLoginAt": user.last_login_at,
@@ -249,8 +516,10 @@ fn user_response(user: &UserRecord) -> Value {
 
 pub(crate) async fn register(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    let request_id = crate::gateway::request_id_from_headers(&headers);
     if body.email.trim().is_empty() {
         return Err(api_error(StatusCode::BAD_REQUEST, "EMAIL_REQUIRED"));
     }
@@ -262,6 +531,7 @@ pub(crate) async fn register(
     }
 
     let now = crate::runtime::now_millis();
+    let require_verification = state.config.auth_require_email_verification;
     let user = UserRecord {
         id: Uuid::new_v4().to_string(),
         email: body.email.trim().to_lowercase(),
@@ -269,38 +539,91 @@ pub(crate) async fn register(
             .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "HASH_FAILED"))?,
         name: body.name,
         role: "user".to_string(),
-        status: "active".to_string(),
+        status: if require_verification {
+            "pending_verification".to_string()
+        } else {
+            "active".to_string()
+        },
+        email_verified: !require_verification,
         created_at: now,
         updated_at: now,
         last_login_at: None,
+        refresh_token_hash: None,
+        refresh_token_expires_at: None,
+        verification_token_hash: None,
+        verification_token_expires_at: None,
+        reset_token_hash: None,
+        reset_token_expires_at: None,
     };
 
-    let saved = state
-        .user_store
-        .create(user)
-        .map_err(|e| {
-            if e == "EMAIL_TAKEN" {
-                api_error(StatusCode::CONFLICT, "EMAIL_TAKEN")
-            } else {
-                api_error(StatusCode::INTERNAL_SERVER_ERROR, "CREATE_FAILED")
-            }
-        })?;
+    let saved = state.user_store.create(user).map_err(|e| {
+        if e == "EMAIL_TAKEN" {
+            api_error(StatusCode::CONFLICT, "EMAIL_TAKEN")
+        } else {
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "CREATE_FAILED")
+        }
+    })?;
 
     let jwt = issue_jwt(&saved, &state)
         .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "JWT_FAILED"))?;
 
     let mut response_headers = HeaderMap::new();
     if let Ok(val) = HeaderValue::from_str(&auth_cookie_value(&jwt, &state.config)) {
-        response_headers.insert(SET_COOKIE, val);
+        response_headers.append(SET_COOKIE, val);
+    }
+    let _ = issue_refresh_cookie_for_user(&state, &saved, &mut response_headers);
+    set_request_id_header(&mut response_headers, &request_id);
+
+    if require_verification {
+        let token = random_token();
+        let token_hash = hash_token(&state.config.auth_jwt_secret, &token);
+        let expires_at = crate::runtime::now_millis() + state.config.email_verify_ttl_ms as i64;
+        let _ = state
+            .user_store
+            .set_verification_token(&saved.id, token_hash, expires_at);
+        let _ = state
+            .backend
+            .auth_outbox_event(
+                "verify_email",
+                &saved.email,
+                json!({
+                    "token": token,
+                    "expiresAt": expires_at,
+                    "userId": saved.id,
+                    "name": saved.name
+                }),
+                &crate::adapters::backend::BackendContext {
+                    site: "default".to_string(),
+                    actor_key: Some(format!("user:{}", saved.id)),
+                    connection_id: None,
+                    ip: Some(crate::gateway::connection_ip_from_headers(&headers)),
+                    user_agent: headers
+                        .get("user-agent")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string),
+                    user: Some(crate::adapters::backend::BackendUser {
+                        id: Some(saved.id.clone()),
+                        role: saved.role.clone(),
+                    }),
+                },
+                Some(&request_id),
+            )
+            .await;
     }
 
-    Ok((StatusCode::CREATED, response_headers, Json(user_response(&saved))))
+    Ok((
+        StatusCode::CREATED,
+        response_headers,
+        Json(user_response(&saved)),
+    ))
 }
 
 pub(crate) async fn login(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    let request_id = crate::gateway::request_id_from_headers(&headers);
     let user = state
         .user_store
         .find_by_email(&body.email.trim().to_lowercase())
@@ -308,6 +631,9 @@ pub(crate) async fn login(
 
     if !verify_password(&body.password, &user.password_hash) {
         return Err(api_error(StatusCode::UNAUTHORIZED, "INVALID_CREDENTIALS"));
+    }
+    if state.config.auth_require_email_verification && !user.email_verified {
+        return Err(api_error(StatusCode::FORBIDDEN, "EMAIL_NOT_VERIFIED"));
     }
 
     let _ = state.user_store.update_login(&user.id);
@@ -317,29 +643,58 @@ pub(crate) async fn login(
 
     let mut response_headers = HeaderMap::new();
     if let Ok(val) = HeaderValue::from_str(&auth_cookie_value(&jwt, &state.config)) {
-        response_headers.insert(SET_COOKIE, val);
+        response_headers.append(SET_COOKIE, val);
     }
 
     // Re-fetch to get updated last_login_at
     let updated = state.user_store.find_by_id(&user.id).unwrap_or(user);
+    let _ = issue_refresh_cookie_for_user(&state, &updated, &mut response_headers);
+    set_request_id_header(&mut response_headers, &request_id);
 
-    Ok((StatusCode::OK, response_headers, Json(user_response(&updated))))
+    Ok((
+        StatusCode::OK,
+        response_headers,
+        Json(user_response(&updated)),
+    ))
 }
 
 pub(crate) async fn logout(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
+    let request_id = crate::gateway::request_id_from_headers(&headers);
+    if let Some(token) = cookie_value(&headers, &state.config.auth_cookie_name) {
+        let mut validation = jsonwebtoken::Validation::new(Algorithm::HS256);
+        validation.validate_exp = false;
+        validation.validate_aud = false;
+        if let Ok(decoded) = jsonwebtoken::decode::<crate::gateway::AuthClaims>(
+            &token,
+            &jsonwebtoken::DecodingKey::from_secret(state.config.auth_jwt_secret.as_bytes()),
+            &validation,
+        ) {
+            let _ = state.user_store.clear_refresh_token(&decoded.claims.sub);
+        }
+    }
     let mut response_headers = HeaderMap::new();
     if let Ok(val) = HeaderValue::from_str(&clear_cookie_value(&state.config)) {
-        response_headers.insert(SET_COOKIE, val);
+        response_headers.append(SET_COOKIE, val);
     }
-    Ok((StatusCode::OK, response_headers, Json(json!({ "status": "ok" }))))
+    if let Ok(val) = HeaderValue::from_str(&clear_refresh_cookie_value(&state.config)) {
+        response_headers.append(SET_COOKIE, val);
+    }
+    set_request_id_header(&mut response_headers, &request_id);
+    Ok((
+        StatusCode::OK,
+        response_headers,
+        Json(json!({ "status": "ok" })),
+    ))
 }
 
 pub(crate) async fn me(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
+    let request_id = crate::gateway::request_id_from_headers(&headers);
     let token = cookie_value(&headers, &state.config.auth_cookie_name)
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "NO_AUTH_COOKIE"))?;
 
@@ -359,19 +714,25 @@ pub(crate) async fn me(
         .find_by_id(&claims.sub)
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "USER_NOT_FOUND"))?;
 
-    Ok(Json(user_response(&user)))
+    let mut response_headers = HeaderMap::new();
+    set_request_id_header(&mut response_headers, &request_id);
+    Ok((StatusCode::OK, response_headers, Json(user_response(&user))))
 }
 
 pub(crate) async fn oidc_start(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
+    let request_id = crate::gateway::request_id_from_headers(&headers);
     if !state.config.oidc_enabled {
         return Err(api_error(StatusCode::NOT_FOUND, "OIDC_DISABLED"));
     }
 
     let client = build_oidc_client(&state)?;
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    let mut auth_request = client.authorize_url(CsrfToken::new_random).set_pkce_challenge(pkce_challenge);
+    let mut auth_request = client
+        .authorize_url(CsrfToken::new_random)
+        .set_pkce_challenge(pkce_challenge);
     for scope in state.config.oidc_scopes.split_whitespace() {
         auth_request = auth_request.add_scope(Scope::new(scope.to_string()));
     }
@@ -379,25 +740,29 @@ pub(crate) async fn oidc_start(
     let (auth_url, csrf_token) = auth_request.url();
 
     let expires_at = crate::runtime::now_secs() + state.config.oidc_state_ttl_secs;
-    state
-        .oidc_states
-        .lock()
-        .expect("oidc state lock")
-                .insert(
-            csrf_token.secret().to_string(),
-            crate::gateway::OidcStateRecord {
-                verifier: pkce_verifier.secret().to_string(),
-                expires_at_secs: expires_at,
-            },
-        );
+    state.oidc_states.lock().expect("oidc state lock").insert(
+        csrf_token.secret().to_string(),
+        crate::gateway::OidcStateRecord {
+            verifier: pkce_verifier.secret().to_string(),
+            expires_at_secs: expires_at,
+        },
+    );
 
-    Ok(axum::response::Redirect::temporary(auth_url.as_ref()))
+    let mut response_headers = HeaderMap::new();
+    set_request_id_header(&mut response_headers, &request_id);
+    Ok((
+        StatusCode::TEMPORARY_REDIRECT,
+        response_headers,
+        axum::response::Redirect::temporary(auth_url.as_ref()),
+    ))
 }
 
 pub(crate) async fn oidc_callback(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<OidcCallbackQuery>,
 ) -> ApiResult<impl IntoResponse> {
+    let request_id = crate::gateway::request_id_from_headers(&headers);
     if !state.config.oidc_enabled {
         return Err(api_error(StatusCode::NOT_FOUND, "OIDC_DISABLED"));
     }
@@ -463,9 +828,16 @@ pub(crate) async fn oidc_callback(
             name,
             role: "user".to_string(),
             status: "active".to_string(),
+            email_verified: true,
             created_at: now,
             updated_at: now,
             last_login_at: None,
+            refresh_token_hash: None,
+            refresh_token_expires_at: None,
+            verification_token_hash: None,
+            verification_token_expires_at: None,
+            reset_token_hash: None,
+            reset_token_expires_at: None,
         };
         state
             .user_store
@@ -480,9 +852,217 @@ pub(crate) async fn oidc_callback(
 
     let mut response_headers = HeaderMap::new();
     if let Ok(val) = HeaderValue::from_str(&auth_cookie_value(&jwt, &state.config)) {
-        response_headers.insert(SET_COOKIE, val);
+        response_headers.append(SET_COOKIE, val);
     }
+    let _ = issue_refresh_cookie_for_user(&state, &user, &mut response_headers);
+    set_request_id_header(&mut response_headers, &request_id);
     Ok((StatusCode::OK, response_headers, Json(user_response(&user))))
+}
+
+pub(crate) async fn refresh(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<impl IntoResponse> {
+    let request_id = crate::gateway::request_id_from_headers(&headers);
+    if !state.config.auth_refresh_enabled {
+        return Err(api_error(StatusCode::NOT_FOUND, "REFRESH_DISABLED"));
+    }
+    let token = cookie_value(&headers, &state.config.refresh_cookie_name)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "NO_REFRESH_COOKIE"))?;
+    let token_hash = hash_token(&state.config.auth_jwt_secret, &token);
+    let user = state
+        .user_store
+        .find_by_refresh_token_hash(&token_hash)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "INVALID_REFRESH_TOKEN"))?;
+
+    let jwt = issue_jwt(&user, &state)
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "JWT_FAILED"))?;
+    let mut response_headers = HeaderMap::new();
+    if let Ok(val) = HeaderValue::from_str(&auth_cookie_value(&jwt, &state.config)) {
+        response_headers.append(SET_COOKIE, val);
+    }
+    issue_refresh_cookie_for_user(&state, &user, &mut response_headers)
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "REFRESH_ROTATE_FAILED"))?;
+    set_request_id_header(&mut response_headers, &request_id);
+    Ok((StatusCode::OK, response_headers, Json(user_response(&user))))
+}
+
+pub(crate) async fn forgot_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ForgotPasswordRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let request_id = crate::gateway::request_id_from_headers(&headers);
+    let email = body.email.trim().to_lowercase();
+    if email.is_empty() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "EMAIL_REQUIRED"));
+    }
+    let mut response_headers = HeaderMap::new();
+    set_request_id_header(&mut response_headers, &request_id);
+
+    let token = random_token();
+    let token_hash = hash_token(&state.config.auth_jwt_secret, &token);
+    let expires_at = crate::runtime::now_millis() + state.config.password_reset_ttl_ms as i64;
+    let user_opt = state
+        .user_store
+        .issue_reset_token_by_email(&email, token_hash, expires_at)
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "RESET_TOKEN_FAILED"))?;
+    if let Some(user) = user_opt {
+        let _ = state
+            .backend
+            .auth_outbox_event(
+                "password_reset",
+                &user.email,
+                json!({
+                    "token": token,
+                    "expiresAt": expires_at,
+                    "userId": user.id,
+                    "name": user.name
+                }),
+                &crate::adapters::backend::BackendContext {
+                    site: "default".to_string(),
+                    actor_key: Some(format!("user:{}", user.id)),
+                    connection_id: None,
+                    ip: Some(crate::gateway::connection_ip_from_headers(&headers)),
+                    user_agent: headers
+                        .get("user-agent")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string),
+                    user: Some(crate::adapters::backend::BackendUser {
+                        id: Some(user.id.clone()),
+                        role: user.role.clone(),
+                    }),
+                },
+                Some(&request_id),
+            )
+            .await;
+    }
+
+    Ok((
+        StatusCode::OK,
+        response_headers,
+        Json(json!({ "status": "ok" })),
+    ))
+}
+
+pub(crate) async fn reset_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ResetPasswordRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let request_id = crate::gateway::request_id_from_headers(&headers);
+    if body.new_password.len() < 8 {
+        return Err(api_error(StatusCode::BAD_REQUEST, "PASSWORD_TOO_SHORT"));
+    }
+    if body.token.trim().is_empty() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "TOKEN_REQUIRED"));
+    }
+    let token_hash = hash_token(&state.config.auth_jwt_secret, body.token.trim());
+    let next_hash = hash_password(&body.new_password)
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "HASH_FAILED"))?;
+    let updated = state
+        .user_store
+        .reset_password_by_token_hash(&token_hash, next_hash)
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "RESET_FAILED"))?;
+    if updated.is_none() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "RESET_TOKEN_INVALID"));
+    }
+
+    let mut response_headers = HeaderMap::new();
+    if let Ok(val) = HeaderValue::from_str(&clear_refresh_cookie_value(&state.config)) {
+        response_headers.append(SET_COOKIE, val);
+    }
+    set_request_id_header(&mut response_headers, &request_id);
+    Ok((
+        StatusCode::OK,
+        response_headers,
+        Json(json!({ "status": "ok" })),
+    ))
+}
+
+pub(crate) async fn verify_email(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<VerifyEmailRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let request_id = crate::gateway::request_id_from_headers(&headers);
+    if body.token.trim().is_empty() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "TOKEN_REQUIRED"));
+    }
+    let token_hash = hash_token(&state.config.auth_jwt_secret, body.token.trim());
+    let user = state
+        .user_store
+        .mark_email_verified_by_token_hash(&token_hash)
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "VERIFY_FAILED"))?
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "VERIFY_TOKEN_INVALID"))?;
+
+    let jwt = issue_jwt(&user, &state)
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "JWT_FAILED"))?;
+    let mut response_headers = HeaderMap::new();
+    if let Ok(val) = HeaderValue::from_str(&auth_cookie_value(&jwt, &state.config)) {
+        response_headers.append(SET_COOKIE, val);
+    }
+    let _ = issue_refresh_cookie_for_user(&state, &user, &mut response_headers);
+    set_request_id_header(&mut response_headers, &request_id);
+    Ok((StatusCode::OK, response_headers, Json(user_response(&user))))
+}
+
+pub(crate) async fn resend_verification(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ResendVerificationRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let request_id = crate::gateway::request_id_from_headers(&headers);
+    let email = body.email.trim().to_lowercase();
+    if email.is_empty() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "EMAIL_REQUIRED"));
+    }
+    let mut response_headers = HeaderMap::new();
+    set_request_id_header(&mut response_headers, &request_id);
+
+    let token = random_token();
+    let token_hash = hash_token(&state.config.auth_jwt_secret, &token);
+    let expires_at = crate::runtime::now_millis() + state.config.email_verify_ttl_ms as i64;
+    let user_opt = state
+        .user_store
+        .issue_verification_token_by_email(&email, token_hash, expires_at)
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "VERIFY_RESEND_FAILED"))?;
+    if let Some(user) = user_opt {
+        let _ = state
+            .backend
+            .auth_outbox_event(
+                "verify_email",
+                &user.email,
+                json!({
+                    "token": token,
+                    "expiresAt": expires_at,
+                    "userId": user.id,
+                    "name": user.name
+                }),
+                &crate::adapters::backend::BackendContext {
+                    site: "default".to_string(),
+                    actor_key: Some(format!("user:{}", user.id)),
+                    connection_id: None,
+                    ip: Some(crate::gateway::connection_ip_from_headers(&headers)),
+                    user_agent: headers
+                        .get("user-agent")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string),
+                    user: Some(crate::adapters::backend::BackendUser {
+                        id: Some(user.id.clone()),
+                        role: user.role.clone(),
+                    }),
+                },
+                Some(&request_id),
+            )
+            .await;
+    }
+
+    Ok((
+        StatusCode::OK,
+        response_headers,
+        Json(json!({ "status": "ok" })),
+    ))
 }
 
 fn build_oidc_client(state: &AppState) -> ApiResult<BasicClient> {
@@ -506,8 +1086,9 @@ fn build_oidc_client(state: &AppState) -> ApiResult<BasicClient> {
             AuthUrl::new(state.config.oidc_auth_url.clone())
                 .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "OIDC_CONFIG_INVALID"))?,
             Some(
-                TokenUrl::new(state.config.oidc_token_url.clone())
-                    .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "OIDC_CONFIG_INVALID"))?,
+                TokenUrl::new(state.config.oidc_token_url.clone()).map_err(|_| {
+                    api_error(StatusCode::INTERNAL_SERVER_ERROR, "OIDC_CONFIG_INVALID")
+                })?,
             ),
         )
         .set_redirect_uri(
@@ -556,9 +1137,16 @@ mod tests {
             name: "Test".into(),
             role: "user".into(),
             status: "active".into(),
+            email_verified: true,
             created_at: 0,
             updated_at: 0,
             last_login_at: None,
+            refresh_token_hash: None,
+            refresh_token_expires_at: None,
+            verification_token_hash: None,
+            verification_token_expires_at: None,
+            reset_token_hash: None,
+            reset_token_expires_at: None,
         };
         let json = user_to_json(&user);
         assert!(json.get("passwordHash").is_none());

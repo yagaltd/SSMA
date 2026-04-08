@@ -11,10 +11,13 @@ Session cookie based auth using `ssma_session` (configurable via `SSMA_AUTH_COOK
 
 ### Auth Flow
 
-1. **Register** → `POST /auth/register` → Argon2id hash → store in JSON file → issue JWT → set cookie
-2. **Login** → `POST /auth/login` → verify password → issue JWT → set cookie
-3. **Logout** → `POST /auth/logout` → clear cookie
-4. **Me** → `GET /auth/me` → decode JWT → return user profile
+1. **Register** → `POST /auth/register` → Argon2id hash → store in JSON file → issue session + refresh cookies
+2. **Login** → `POST /auth/login` → verify password (and optional email verification gate) → issue cookies
+3. **Refresh** → `POST /auth/refresh` → rotate refresh token + issue new session cookie
+4. **Logout** → `POST /auth/logout` → clear session and refresh cookies
+5. **Me** → `GET /auth/me` → decode JWT → return user profile
+6. **Recovery** → `POST /auth/forgot-password` + `POST /auth/reset-password`
+7. **Email verification** → `POST /auth/verify-email` + `POST /auth/resend-verification`
 
 ### Response Shape
 
@@ -29,6 +32,7 @@ All auth endpoints return `{ status: "ok", user: {...} }`:
     "name": "User",
     "role": "user",
     "status": "active",
+    "emailVerified": true,
     "createdAt": 1234567890,
     "updatedAt": 1234567890,
     "lastLoginAt": null
@@ -51,6 +55,9 @@ This envelope matches CSMA's `AuthService` expectation of `response.user`.
 - `SameSite=Lax` — CSRF protection
 - `Secure` — only sent over HTTPS (controlled by `SSMA_AUTH_COOKIE_SECURE`, default `true`)
 - `Path=/`
+- Refresh cookie name: `SSMA_REFRESH_COOKIE` (default `ssma_refresh`)
+
+Auth endpoints also include `x-request-id` for traceability.
 
 ### WS/SSE Auth
 

@@ -1,17 +1,20 @@
 use crate::adapters::backend::{BackendContext, BackendUser};
 use crate::transport::{
-    api_error, connection_ip_from_headers, consume_global_rate_limit, cookie_value, emit_server_event,
-    purge_expired_runtime_state, request_id_from_headers, request_site, resolve_actor_from_headers, ApiResult, AppState,
+    api_error, connection_ip_from_headers, consume_global_rate_limit, cookie_value,
+    emit_server_event, purge_expired_runtime_state, request_id_from_headers, request_site,
+    resolve_actor_from_headers, ApiResult, AppState,
 };
-use axum::extract::State;
 use axum::body::Bytes;
+use axum::extract::State;
 use axum::http::header::SET_COOKIE;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
+use futures_util::stream;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
@@ -31,7 +34,10 @@ pub(crate) async fn submit_form(
 ) -> ApiResult<impl IntoResponse> {
     purge_expired_runtime_state(&state);
     if body.len() as u64 > state.config.form_max_body_bytes {
-        return Err(api_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE"));
+        return Err(api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "PAYLOAD_TOO_LARGE",
+        ));
     }
     let request_id = request_id_from_headers(&headers);
     let content_type = headers
@@ -39,7 +45,7 @@ pub(crate) async fn submit_form(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_lowercase();
-    let body = parse_form_request(&headers, &content_type, &body)?;
+    let body = parse_form_request(&headers, &content_type, &body).await?;
 
     if body.form_name.trim().is_empty() {
         return Err(api_error(StatusCode::BAD_REQUEST, "INVALID_FORM_NAME"));
@@ -121,7 +127,10 @@ pub(crate) async fn submit_form(
             "FORM_CAPTCHA_REJECTED",
             json!({"site": site, "formName": body.form_name, "actorKey": actor.actor_key}),
         );
-        return Err(api_error(StatusCode::FORBIDDEN, "CAPTCHA_VERIFICATION_FAILED"));
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "CAPTCHA_VERIFICATION_FAILED",
+        ));
     }
 
     let backend_ctx = BackendContext {
@@ -224,7 +233,11 @@ async fn verify_captcha(
     }
 }
 
-fn parse_form_request(headers: &HeaderMap, content_type: &str, body: &Bytes) -> ApiResult<FormSubmitRequest> {
+async fn parse_form_request(
+    headers: &HeaderMap,
+    content_type: &str,
+    body: &Bytes,
+) -> ApiResult<FormSubmitRequest> {
     if content_type.contains("application/json") || content_type.is_empty() {
         return serde_json::from_slice::<FormSubmitRequest>(body)
             .map_err(|_| api_error(StatusCode::BAD_REQUEST, "INVALID_JSON"));
@@ -240,6 +253,58 @@ fn parse_form_request(headers: &HeaderMap, content_type: &str, body: &Bytes) -> 
             .and_then(|value| serde_json::from_str::<Value>(value).ok());
         let payload = Value::Object(
             parsed
+                .iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "formName" | "honeypot" | "captchaToken" | "meta" | "csrfToken"
+                    )
+                })
+                .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                .collect(),
+        );
+        return Ok(FormSubmitRequest {
+            form_name,
+            payload,
+            honeypot,
+            captcha_token,
+            meta,
+        });
+    }
+    if content_type.contains("multipart/form-data") {
+        let boundary = multer::parse_boundary(content_type)
+            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "INVALID_MULTIPART"))?;
+        let one_shot = stream::once(async { Ok::<Bytes, Infallible>(body.clone()) });
+        let mut multipart = multer::Multipart::new(one_shot, boundary);
+
+        let mut fields = HashMap::<String, String>::new();
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "INVALID_MULTIPART"))?
+        {
+            let name = match field.name() {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+            if field.file_name().is_some() {
+                continue;
+            }
+            let value = field
+                .text()
+                .await
+                .map_err(|_| api_error(StatusCode::BAD_REQUEST, "INVALID_MULTIPART"))?;
+            fields.insert(name, value);
+        }
+
+        let form_name = fields.get("formName").cloned().unwrap_or_default();
+        let honeypot = fields.get("honeypot").cloned();
+        let captcha_token = fields.get("captchaToken").cloned();
+        let meta = fields
+            .get("meta")
+            .and_then(|value| serde_json::from_str::<Value>(value).ok());
+        let payload = Value::Object(
+            fields
                 .iter()
                 .filter(|(key, _)| {
                     !matches!(
@@ -283,7 +348,13 @@ fn enforce_csrf_if_needed(
         .get(&state.config.form_csrf_header_name)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string())
-        .or_else(|| body.meta.as_ref().and_then(|meta| meta.get("csrfToken")).and_then(Value::as_str).map(str::to_string));
+        .or_else(|| {
+            body.meta
+                .as_ref()
+                .and_then(|meta| meta.get("csrfToken"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
     let token = token.ok_or_else(|| api_error(StatusCode::FORBIDDEN, "CSRF_TOKEN_MISSING"))?;
     if token != cookie {
         return Err(api_error(StatusCode::FORBIDDEN, "CSRF_TOKEN_INVALID"));

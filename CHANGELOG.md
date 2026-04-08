@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-04-08
+
+### Added
+
+- Auth lifecycle endpoints:
+  - `POST /auth/refresh`
+  - `POST /auth/forgot-password`
+  - `POST /auth/reset-password`
+  - `POST /auth/verify-email`
+  - `POST /auth/resend-verification`
+- Backend adapter hook: `POST /auth/outbox` for `verify_email` and `password_reset` delivery events.
+- Multipart field parsing support on `POST /forms/submit` (`multipart/form-data`, text fields).
+- New auth config knobs:
+  - `SSMA_REFRESH_COOKIE`
+  - `SSMA_AUTH_REFRESH_ENABLED`
+  - `SSMA_REFRESH_TTL_MS`
+  - `SSMA_AUTH_REQUIRE_EMAIL_VERIFICATION`
+  - `SSMA_EMAIL_VERIFY_TTL_MS`
+  - `SSMA_PASSWORD_RESET_TTL_MS`
+- E2E coverage for refresh, forgot/reset password, email verify/resend, and multipart forms.
+
+### Changed
+
+- Auth responses now consistently include `x-request-id` headers.
+- Register/login/OIDC flows now issue refresh cookies when refresh flow is enabled.
+- Logout and password reset flows clear refresh cookies/tokens.
+
 ## [0.4.0] - 2026-04-08
 
 ### Added

@@ -12,9 +12,10 @@ Sits between frontend clients and your business backend. Owns transport, auth, p
 - Channel subscription fanout
 - Media upload/download
 - RTC signaling coordination
-- Generic form ingress handling (honeypot/captcha hooks + backend forward)
+- Generic form ingress handling (JSON/urlencoded/multipart + honeypot/captcha/csrf hooks + backend forward)
 - Generic webhook ingress handling (verification hook + idempotency + backend forward)
 - OIDC client bridge endpoints
+- Auth lifecycle endpoints (refresh, forgot/reset password, email verification)
 - Backend adapter forwarding
 - Protocol validation
 
@@ -114,8 +115,13 @@ Read before changing code:
 ### Auth
 - `POST /auth/register`
 - `POST /auth/login`
+- `POST /auth/refresh`
 - `POST /auth/logout`
 - `GET /auth/me`
+- `POST /auth/forgot-password`
+- `POST /auth/reset-password`
+- `POST /auth/verify-email`
+- `POST /auth/resend-verification`
 - `GET /auth/oidc/start`
 - `GET /auth/oidc/callback`
 
@@ -124,7 +130,7 @@ Read before changing code:
 - `POST /query/:name/stream` (SSE)
 
 ### Forms
-- `POST /forms/submit` (JSON)
+- `POST /forms/submit` (`application/json`, `application/x-www-form-urlencoded`, `multipart/form-data`)
 
 ### Webhooks
 - `POST /webhooks/:provider`
