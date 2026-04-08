@@ -83,19 +83,58 @@ Read before changing code:
 
 ## Gateway Surface
 
-The Rust runtime exposes:
+### Transport
 
-- `POST /media/assets`
-- `GET /media/assets/:assetId`
-- `GET /media/assets/:assetId/content`
-- `DELETE /media/assets/:assetId`
-- `POST /rtc/sessions`
-- `POST /rtc/sessions/:sessionId/signals`
+- `GET /health` — service health + cursor
+- `GET /optimistic/metrics` — operational counters
+- `GET /optimistic/ws` — WebSocket sync (leader/follower)
+- `GET /optimistic/events` — SSE stream
 
-Backend adapters can fetch SSMA-owned assets through:
+### Auth
 
-- `GET /internal/assets/:assetId`
-- `GET /internal/assets/:assetId/content`
+- `POST /auth/register` → `{ status, user }`
+- `POST /auth/login` → `{ status, user }`
+- `POST /auth/logout` → `{ status }`
+- `GET /auth/me` → `{ status, user }`
+
+### Query
+
+- `POST /query/:name` — JSON query to backend adapter
+- `POST /query/:name/stream` — SSE streaming (NDJSON from backend)
+
+### Media
+
+- `POST /media/assets` — upload binary (image/audio)
+- `GET /media/assets/:assetId` — metadata
+- `GET /media/assets/:assetId/content` — raw bytes
+- `DELETE /media/assets/:assetId` — remove
+
+### RTC & Audio
+
+- `POST /rtc/sessions` — create signaling session
+- `POST /rtc/sessions/:sessionId/signals` — submit signal
+- `POST /audio/sessions` — create audio session
+- `GET /audio/sessions/:sessionId` — session metadata
+- `DELETE /audio/sessions/:sessionId` — end session
+- `POST /audio/sessions/:sessionId/commands` — start/pause/resume/stop
+
+### Admin (staff+)
+
+- `GET /admin/optimistic/channels` — active subscriptions
+- `GET /admin/optimistic/intents` — pending intents
+
+### Logs
+
+- `POST /logs/batch` — forward logs to relay URL
+- `GET /logs/health` — relay status
+
+### Internal (backend token required)
+
+- `POST /internal/backend/events` — ingest backend events
+- `POST /internal/assets` — backend-created asset upload
+- `GET /internal/assets/:assetId` — metadata
+- `GET /internal/assets/:assetId/content` — raw bytes
+- `DELETE /internal/assets/:assetId` — remove
 
 Important behavior:
 
@@ -103,6 +142,8 @@ Important behavior:
 - adapters consume `assetId` references, not raw/base64 payloads
 - guest-owned media and RTC sessions are bound to `SSMA_ANON_COOKIE` (`ssma_anon` by default)
 - RTC signaling is ephemeral channel traffic and does not enter durable optimistic replay
+- auth endpoints return `{ status: "ok", user: {...} }` envelope for CSMA compatibility
+- streaming queries use SSE with NDJSON chunks from backend
 
 ## Templates
 

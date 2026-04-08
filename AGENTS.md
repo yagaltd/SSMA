@@ -35,6 +35,8 @@ Each skill covers a specific domain. Read the relevant skill before making chang
 - `channel.snapshot`, `channel.replay`, and `channel.invalidate` preserve subscription `params`.
 - `channel.invalidate` targets one `channel`, not `channels[]`.
 - shutdown must stop sockets, listeners, and reconnect loops cleanly.
+- auth endpoints return `{ status: "ok", user: {...} }` envelope (matches CSMA `response.user`).
+- `/query/:name` returns JSON, `/query/:name/stream` returns SSE with NDJSON chunks.
 
 ## Working Rules
 
