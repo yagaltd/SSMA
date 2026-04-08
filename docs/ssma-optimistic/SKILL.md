@@ -1,6 +1,6 @@
 ---
 name: ssma-optimistic
-description: Work on intent persistence, replay, channel subscriptions, or fanout logic. Use when modifying runtime.rs, gateway/optimistic.rs, or channel behavior.
+description: Work on intent persistence, replay, channel subscriptions, or fanout logic. Use when modifying domain/runtime.rs, features/optimistic.rs, or channel behavior.
 ---
 
 # SSMA Optimistic Sync
@@ -9,7 +9,7 @@ description: Work on intent persistence, replay, channel subscriptions, or fanou
 
 SSMA persists optimistic intents from clients and replays them to reconnecting clients. This enables offline-first and multi-tab sync.
 
-## Intent Store (`runtime.rs`)
+## Intent Store (`domain/runtime.rs`)
 
 ### IntentRecord
 
@@ -91,7 +91,7 @@ Client sends `{ type: "channel.unsubscribe", channel: "todos", params: {} }`
 Client sends `{ type: "channel.resync", channel: "todos", params: {} }`
 → Returns `channel.replay` with intents since the subscription's cursor
 
-## Rework & Undo (`gateway/optimistic.rs`)
+## Rework & Undo (`features/optimistic.rs`)
 
 ### Rework (staff+)
 
@@ -137,7 +137,7 @@ Key events emitted during optimistic flow:
 
 ## Key Files
 
-- `runtime.rs` — IntentStore, append_batch, deduplication, persistence
-- `gateway/optimistic.rs` — Rework, undo, pending queries
-- `gateway/mod.rs` — Channel registry, subscription management, fanout helpers
-- `gateway/ws.rs` — handle_intent_batch, channel subscribe/unsubscribe/resync
+- `domain/runtime.rs` — IntentStore, append_batch, deduplication, persistence
+- `features/optimistic.rs` — Rework, undo, pending queries
+- `transport/mod.rs` — Channel registry, subscription management, fanout helpers
+- `transport/ws.rs` — handle_intent_batch, channel subscribe/unsubscribe/resync

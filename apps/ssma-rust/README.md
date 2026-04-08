@@ -69,12 +69,6 @@ From `apps/ssma-rust/`:
 - Unit + conformance + E2E tests:
   - `cargo test -- --nocapture`
 
-From repository root:
-
-- JS conformance and docs checks used by CI:
-  - `npm --prefix apps/ssma-js run check:docs`
-  - `npm --prefix apps/ssma-js run test:conformance`
-
 ## Notes
 
 - In restricted/offline environments, `cargo` may fail to download crates from `crates.io`.

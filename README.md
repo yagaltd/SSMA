@@ -39,18 +39,10 @@ apps/ssma-rust/          Gateway binary
 │   ├── main.rs          Entry point
 │   ├── config.rs        Config::from_env()
 │   ├── protocol.rs      JSON schema validation
-│   ├── runtime.rs       IntentStore (persist, dedupe, replay)
-│   ├── backend.rs       BackendHttpClient (adapter calls)
-│   └── gateway/
-│       ├── mod.rs       AppState, router, helpers
-│       ├── ws.rs        WebSocket session
-│       ├── sse.rs       SSE stream
-│       ├── auth.rs      Register/login/JWT
-│       ├── media.rs     Asset upload/download
-│       ├── admin.rs     Staff endpoints
-│       ├── optimistic.rs Rework/undo
-│       ├── logs.rs      Log relay
-│       └── internal.rs  Backend event ingestion
+│   ├── domain/runtime.rs IntentStore (persist, dedupe, replay)
+│   ├── adapters/backend.rs BackendHttpClient (adapter calls)
+│   ├── transport/       Inbound HTTP/WS/SSE transport
+│   └── features/        Feature handlers (media, rtc, audio, optimistic)
 └── tests/               E2E + unit tests
 
 packages/ssma-protocol/  Shared contracts + vectors
@@ -68,7 +60,7 @@ docs/                  AI-agent instructions
 └── ssma-testing/        How to write tests
 ```
 
-## Skills
+## Docs
 
 Read before changing code:
 

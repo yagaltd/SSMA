@@ -1,7 +1,8 @@
 use crate::gateway::{
-    api_error, optimistic, resolve_user_from_headers, role_rank, ApiResult, AppState,
+    api_error, resolve_user_from_headers, role_rank, ApiResult, AppState,
     ConnectionChannels,
 };
+use crate::features::optimistic;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;

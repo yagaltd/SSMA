@@ -20,8 +20,6 @@ cd apps/ssma-rust && cargo test register_returns_201 -- --nocapture
 # Unit tests only (lib)
 cd apps/ssma-rust && cargo test --lib -- --nocapture
 
-# Template validation
-npm run validate:templates
 ```
 
 ## Test Structure
@@ -29,10 +27,11 @@ npm run validate:templates
 ```
 apps/ssma-rust/
 ├── src/
-│   └── gateway/
-│       ├── auth.rs      # mod tests {} — password hashing, JWT
-│       ├── media.rs     # mod tests {} — MIME type detection
-│       └── mod.rs       # mod tests {} — role_rank, normalize_status
+│   ├── transport/
+│   │   ├── auth.rs      # mod tests {} — password hashing, JWT
+│   │   └── mod.rs       # mod tests {} — role_rank, normalize_status
+│   └── features/
+│       └── media.rs     # mod tests {} — MIME type detection
 ├── tests/
 │   ├── e2e_auth.rs          # Register, login, logout, /me
 │   ├── e2e_admin.rs         # Admin endpoints (staff+)

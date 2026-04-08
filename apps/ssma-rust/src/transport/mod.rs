@@ -1,11 +1,6 @@
 pub mod admin;
-pub mod audio;
 pub mod auth;
 pub mod internal;
-pub mod logs;
-pub mod media;
-pub mod optimistic;
-pub mod rtc;
 pub mod sse;
 pub mod ws;
 
@@ -30,9 +25,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-// Re-exports for modules/webrtc.rs backward compat
-pub use self::audio::apply_audio_backend_event;
-pub use self::rtc::emit_rtc_signal;
+// Re-exports for features/webrtc.rs helpers.
+pub use crate::features::audio::apply_audio_backend_event;
+pub use crate::features::rtc::emit_rtc_signal;
 
 // --- Types ---
 
@@ -50,7 +45,7 @@ pub struct AppState {
     pub(crate) global_limits: Arc<Mutex<HashMap<String, RateBucket>>>,
     pub(crate) channel_registry: Arc<Mutex<HashMap<String, ConnectionChannels>>>,
     pub(crate) metrics: Arc<MetricsState>,
-    pub(crate) webrtc: crate::modules::webrtc::WebRtcManager,
+    pub(crate) webrtc: crate::features::webrtc::WebRtcManager,
     pub(crate) log_client: reqwest::Client,
 }
 
@@ -320,7 +315,7 @@ pub fn build_state(config: Config) -> Arc<AppState> {
         global_limits: Arc::new(Mutex::new(HashMap::new())),
         channel_registry: Arc::new(Mutex::new(HashMap::new())),
         metrics: Arc::new(MetricsState::default()),
-        webrtc: crate::modules::webrtc::WebRtcManager::new(),
+        webrtc: crate::features::webrtc::WebRtcManager::new(),
         log_client: reqwest::Client::new(),
     })
 }
@@ -334,31 +329,48 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
-        .route("/media/assets", post(media::upload_media))
+        .route("/media/assets", post(crate::features::media::upload_media))
         .route(
             "/media/assets/:asset_id",
-            get(media::get_asset_metadata).delete(media::delete_asset),
+            get(crate::features::media::get_asset_metadata)
+                .delete(crate::features::media::delete_asset),
         )
-        .route("/media/assets/:asset_id/content", get(media::get_asset_content))
-        .route("/audio/sessions", post(audio::create_audio_session))
+        .route(
+            "/media/assets/:asset_id/content",
+            get(crate::features::media::get_asset_content),
+        )
+        .route("/audio/sessions", post(crate::features::audio::create_audio_session))
         .route(
             "/audio/sessions/:session_id",
-            get(audio::get_audio_session).delete(audio::delete_audio_session),
+            get(crate::features::audio::get_audio_session)
+                .delete(crate::features::audio::delete_audio_session),
         )
         .route(
             "/audio/sessions/:session_id/commands",
-            post(audio::post_audio_session_command),
+            post(crate::features::audio::post_audio_session_command),
         )
-        .route("/rtc/sessions", post(rtc::create_rtc_session))
-        .route("/rtc/sessions/:session_id/signals", post(rtc::post_rtc_signal))
-        .route("/logs/batch", post(logs::logs_batch))
-        .route("/logs/health", get(logs::logs_health))
+        .route("/rtc/sessions", post(crate::features::rtc::create_rtc_session))
+        .route(
+            "/rtc/sessions/:session_id/signals",
+            post(crate::features::rtc::post_rtc_signal),
+        )
+        .route("/logs/batch", post(crate::features::logs::logs_batch))
+        .route("/logs/health", get(crate::features::logs::logs_health))
         .route("/optimistic/metrics", get(metrics))
         .route("/optimistic/ws", get(ws::ws_upgrade))
         .route("/optimistic/events", get(sse::sse_events))
-        .route("/optimistic/rework", post(optimistic::optimistic_rework))
-        .route("/optimistic/undo", post(optimistic::optimistic_undo))
-        .route("/optimistic/pending", get(optimistic::optimistic_pending))
+        .route(
+            "/optimistic/rework",
+            post(crate::features::optimistic::optimistic_rework),
+        )
+        .route(
+            "/optimistic/undo",
+            post(crate::features::optimistic::optimistic_undo),
+        )
+        .route(
+            "/optimistic/pending",
+            get(crate::features::optimistic::optimistic_pending),
+        )
         .route("/admin/optimistic/channels", get(admin::admin_channels))
         .route("/admin/optimistic/intents", get(admin::admin_intents))
         .route("/internal/backend/events", post(internal::backend_events_ingest))

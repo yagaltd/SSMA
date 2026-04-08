@@ -40,20 +40,22 @@ apps/ssma-rust/
 │   ├── lib.rs               # Module declarations
 │   ├── config.rs            # Config::from_env() — all SSMA_* vars
 │   ├── protocol.rs          # JSON schema validation against contracts
-│   ├── runtime.rs           # IntentStore — append, dedupe, replay, persist
-│   ├── backend.rs           # BackendHttpClient — adapter calls
-│   └── gateway/
-│       ├── mod.rs           # AppState, Router, helpers, build_state()
-│       ├── ws.rs            # WebSocket upgrade + session loop
-│       ├── sse.rs           # SSE stream with replay
-│       ├── auth.rs          # UserStore, register/login/logout/JWT
-│       ├── media.rs         # Asset upload/download/delete
-│       ├── admin.rs         # Staff-only channel/intent inspection
+│   ├── domain/runtime.rs    # IntentStore — append, dedupe, replay, persist
+│   ├── adapters/backend.rs  # BackendHttpClient — adapter calls
+│   ├── transport/
+│   │   ├── mod.rs           # AppState, Router, helpers, build_state()
+│   │   ├── ws.rs            # WebSocket upgrade + session loop
+│   │   ├── sse.rs           # SSE stream with replay
+│   │   ├── auth.rs          # UserStore, register/login/logout/JWT
+│   │   ├── admin.rs         # Staff-only channel/intent inspection
+│   │   ├── logs.rs          # Log relay forwarding
+│   │   └── internal.rs      # Backend-to-SSMA event ingestion
+│   └── features/
 │       ├── optimistic.rs    # Rework/undo/pending queries
-│       ├── logs.rs          # Log relay forwarding
-│       ├── internal.rs      # Backend-to-SSMA event ingestion
+│       ├── media.rs         # Asset upload/download/delete
 │       ├── audio.rs         # Audio session management
-│       └── rtc.rs           # RTC signaling
+│       ├── rtc.rs           # RTC signaling
+│       └── webrtc.rs        # WebRTC bridge manager
 ├── tests/
 │   ├── e2e_*.rs             # End-to-end tests
 │   ├── conformance_runtime.rs
@@ -70,7 +72,7 @@ packages/ssma-protocol/
 1. **Read first**: protocol docs, security docs, relevant SKILL.md
 2. **Implement**: make the change
 3. **Verify**: run `cargo test`
-4. **Update docs**: if behavior changes, update the relevant skill
+4. **Update docs**: if behavior changes, update the relevant doc
 5. **Commit**: never commit broken or undocumented behavior
 
 ## Canonical Truths
@@ -89,5 +91,4 @@ packages/ssma-protocol/
 cd apps/ssma-rust && cargo run
 cd apps/ssma-rust && cargo test -- --nocapture
 cd apps/ssma-rust && cargo test --test <name> -- --nocapture
-npm run validate:templates
 ```

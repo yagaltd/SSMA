@@ -1,6 +1,6 @@
 ---
 name: ssma-security
-description: Modify auth, RBAC, rate limiting, or CORS. Use when changing gateway/auth.rs, security config, or access control logic.
+description: Modify auth, RBAC, rate limiting, or CORS. Use when changing transport/auth.rs, security config, or access control logic.
 ---
 
 # SSMA Security
@@ -128,8 +128,8 @@ Implementation: `tower-http` CorsLayer
 
 ## Key Files
 
-- `gateway/auth.rs` — UserStore, register/login/me handlers, password hashing
-- `gateway/mod.rs` — `resolve_actor_from_headers()`, `role_rank()`, rate limiters, CORS
+- `transport/auth.rs` — UserStore, register/login/me handlers, password hashing
+- `transport/mod.rs` — `resolve_actor_from_headers()`, `role_rank()`, rate limiters, CORS
 - `config.rs` — All `SSMA_AUTH_*`, `SSMA_RATE_*`, `SSMA_ALLOWED_ORIGINS`
 
 ## Rules

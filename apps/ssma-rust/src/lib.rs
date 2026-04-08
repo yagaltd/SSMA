@@ -1,6 +1,10 @@
-pub mod backend;
+pub mod adapters;
 pub mod config;
-pub mod gateway;
-pub mod modules;
+pub mod domain;
+pub mod features;
 pub mod protocol;
-pub mod runtime;
+pub mod transport;
+
+pub use adapters::backend;
+pub use domain::runtime;
+pub use transport as gateway;

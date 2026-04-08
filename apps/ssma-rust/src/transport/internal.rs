@@ -1,9 +1,10 @@
 use super::{
     api_error, asset_metadata, emit_server_event, ensure_backend_token, multipart_error,
-    now_secs, purge_expired_runtime_state, ApiResult, AppState, AssetRecord,
+    purge_expired_runtime_state, ApiResult, AppState, AssetRecord,
     BackendEventsPayload,
 };
-use crate::runtime::now_millis;
+use crate::features::audio;
+use crate::runtime::{now_millis, now_secs};
 use axum::extract::{Multipart, Path, State};
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -23,7 +24,7 @@ pub(crate) fn publish_backend_event(state: &Arc<AppState>, event: &Value) {
                 .to_string();
             let payload = event.get("payload").cloned().unwrap_or_else(|| json!({}));
             if let Some(broadcast) =
-                super::audio::record_backend_audio_event(state, &site, audio_session_id, event_type, payload)
+                audio::record_backend_audio_event(state, &site, audio_session_id, event_type, payload)
             {
                 super::broadcast_app_event(state, broadcast);
             }

@@ -6,6 +6,7 @@ use super::{
     AppState, ConnectionContext, ConnectionUserSummary, WsQuery,
 };
 use crate::backend::{BackendContext, BackendUser};
+use crate::features::{audio, rtc};
 use crate::runtime::IntentRecord;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -559,11 +560,11 @@ async fn handle_channel_subscribe(
 
     let mut snapshot_cursor = state.store.latest_cursor();
     let intents =
-        if let Some((rtc_intents, rtc_cursor)) = super::rtc::rtc_snapshot_for_channel(state, channel, 0) {
+        if let Some((rtc_intents, rtc_cursor)) = rtc::rtc_snapshot_for_channel(state, channel, 0) {
             snapshot_cursor = rtc_cursor;
             rtc_intents
         } else if let Some((audio_intents, audio_cursor)) =
-            super::audio::audio_snapshot_for_channel(state, channel, 0)
+            audio::audio_snapshot_for_channel(state, channel, 0)
         {
             snapshot_cursor = audio_cursor;
             audio_intents
@@ -668,10 +669,10 @@ async fn handle_channel_resync(
     }
     let cursor = payload.get("cursor").and_then(|v| v.as_u64()).unwrap_or(0);
     let (intents, next) =
-        if let Some((rtc_intents, rtc_cursor)) = super::rtc::rtc_snapshot_for_channel(state, channel, cursor) {
+        if let Some((rtc_intents, rtc_cursor)) = rtc::rtc_snapshot_for_channel(state, channel, cursor) {
             (rtc_intents, rtc_cursor)
         } else if let Some((audio_intents, audio_cursor)) =
-            super::audio::audio_snapshot_for_channel(state, channel, cursor)
+            audio::audio_snapshot_for_channel(state, channel, cursor)
         {
             (audio_intents, audio_cursor)
         } else {

@@ -1,4 +1,4 @@
-use crate::gateway::{
+use crate::transport::{
     api_error, collect_gateway_metrics, connection_ip_from_headers, consume_global_rate_limit,
     ApiResult, AppState,
 };

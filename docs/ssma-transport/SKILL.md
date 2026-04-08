@@ -1,6 +1,6 @@
 ---
 name: ssma-transport
-description: Work on HTTP endpoints, WebSocket handlers, SSE streams, or admin APIs. Use when modifying gateway/ws.rs, gateway/sse.rs, gateway/mod.rs routes, or adding new endpoints.
+description: Work on HTTP endpoints, WebSocket handlers, SSE streams, or admin APIs. Use when modifying transport/ws.rs, transport/sse.rs, transport/mod.rs routes, or adding new endpoints.
 ---
 
 # SSMA Transport
@@ -128,17 +128,17 @@ GET /optimistic/events?site=<site>&cursor=<n>&islands=a,b
 
 ## Key Files
 
-- `gateway/mod.rs` — Router setup in `app()`, `build_state()`, helpers
-- `gateway/ws.rs` — WebSocket session loop, intent/channel handling
-- `gateway/sse.rs` — SSE stream construction
-- `gateway/admin.rs` — Staff-only endpoints
-- `gateway/logs.rs` — Log relay forwarding
-- `gateway/internal.rs` — Backend event ingestion, internal assets
+- `transport/mod.rs` — Router setup in `app()`, `build_state()`, helpers
+- `transport/ws.rs` — WebSocket session loop, intent/channel handling
+- `transport/sse.rs` — SSE stream construction
+- `transport/admin.rs` — Staff-only endpoints
+- `transport/logs.rs` — Log relay forwarding
+- `transport/internal.rs` — Backend event ingestion, internal assets
 
 ## Adding a New Route
 
-1. Add handler function in the appropriate `gateway/*.rs` file
-2. Register route in `mod.rs` → `app()` function
+1. Add handler function in the appropriate `transport/*.rs` or `features/*.rs` file
+2. Register route in `transport/mod.rs` → `app()` function
 3. Extract auth with `resolve_actor_from_headers()` or `resolve_user_from_headers()`
 4. Emit server event with `emit_server_event()` for observability
 5. Add E2E test in `tests/e2e_*.rs`

@@ -6,9 +6,9 @@ Read before changing code.
 
 Rust gateway between frontend clients and business backend. Owns transport, auth, persistence, fanout. Does not own business logic.
 
-## Skills
+## Docs
 
-Each skill covers a domain. Read relevant skill before changes:
+Each doc covers a domain. Read relevant doc before changes:
 
 - `docs/ssma-overview/SKILL.md` — architecture, code map, conventions
 - `docs/ssma-protocol/SKILL.md` — wire protocol, contracts, validation
@@ -28,16 +28,10 @@ apps/ssma-rust/src/
 ├── protocol.rs          JSON schema validation
 ├── runtime.rs           IntentStore
 ├── backend.rs           BackendHttpClient
-└── gateway/
-    ├── mod.rs           AppState, router, helpers
-    ├── ws.rs            WebSocket session
-    ├── sse.rs           SSE stream
-    ├── auth.rs          Register/login/JWT
-    ├── media.rs         Asset upload/download
-    ├── admin.rs         Staff endpoints
-    ├── optimistic.rs    Rework/undo
-    ├── logs.rs          Log relay
-    └── internal.rs      Backend events
+├── domain/runtime.rs    IntentStore
+├── adapters/backend.rs  BackendHttpClient
+├── transport/           AppState, router, WS/SSE/auth/admin/internal
+└── features/            optimistic, media, rtc, audio, webrtc
 ```
 
 ## Canonical Truths
@@ -54,10 +48,10 @@ apps/ssma-rust/src/
 
 ## Working Rules
 
-1. Read relevant skill
+1. Read relevant doc
 2. Implement
 3. `cargo test`
-4. Update skill if behavior changes
+4. Update doc if behavior changes
 5. Commit (never broken or undocumented)
 
 ## Commands

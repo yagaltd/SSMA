@@ -1,10 +1,11 @@
-use super::{
-    api_error, broadcast_app_event, emit_server_event, now_millis, now_secs,
+use crate::transport::{
+    api_error, broadcast_app_event, emit_server_event,
     purge_expired_runtime_state, request_site, resolve_actor_from_headers, ApiResult,
     AppState, AudioSessionCapabilities, AudioSessionCommandRequest, AudioSessionEventRecord,
     AudioSessionMode, AudioSessionRecord, AudioSessionStatus, CreateAudioSessionRequest,
     RtcSessionRecord,
 };
+use crate::runtime::{now_millis, now_secs};
 use axum::extract::{Path, State};
 use axum::http::header::SET_COOKIE;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -23,7 +24,7 @@ pub(crate) fn audio_session_metadata(session: &AudioSessionRecord) -> Value {
         "audioSessionId": session.session_id,
         "rtcSessionId": session.rtc_session_id,
         "channel": audio_channel_name(&session.session_id),
-        "rtcChannel": super::rtc::rtc_channel_name(&session.rtc_session_id),
+        "rtcChannel": crate::features::rtc::rtc_channel_name(&session.rtc_session_id),
         "site": session.site,
         "mode": session.mode,
         "status": session.status,
