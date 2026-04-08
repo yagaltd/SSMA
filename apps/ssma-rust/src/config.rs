@@ -9,6 +9,7 @@ pub struct Config {
     pub backend_url: String,
     pub backend_internal_token: String,
     pub auth_cookie_name: String,
+    pub refresh_cookie_name: String,
     pub anonymous_cookie_name: String,
     pub auth_jwt_secret: String,
     pub require_auth_for_writes: bool,
@@ -30,6 +31,11 @@ pub struct Config {
     pub access_ttl_ms: u64,
     pub auth_cookie_secure: bool,
     pub auth_cookie_same_site: String,
+    pub auth_refresh_enabled: bool,
+    pub refresh_ttl_ms: u64,
+    pub auth_require_email_verification: bool,
+    pub email_verify_ttl_ms: u64,
+    pub password_reset_ttl_ms: u64,
     pub allowed_origins: String,
     pub optimistic_rework_window_ms: u64,
     pub optimistic_rework_max: u32,
@@ -38,6 +44,30 @@ pub struct Config {
     pub optimistic_max_entries: usize,
     pub log_relay_url: String,
     pub backend_timeout_ms: u64,
+    pub query_max_body_bytes: u64,
+    pub form_max_body_bytes: u64,
+    pub webhook_max_body_bytes: u64,
+    pub form_rate_window_ms: i64,
+    pub form_rate_max: u32,
+    pub form_captcha_mode: String,
+    pub form_captcha_verify_url: String,
+    pub form_captcha_timeout_ms: u64,
+    pub form_csrf_mode: String,
+    pub form_csrf_cookie_name: String,
+    pub form_csrf_header_name: String,
+    pub webhook_verify_mode: String,
+    pub webhook_verify_url: String,
+    pub webhook_verify_timeout_ms: u64,
+    pub webhook_idempotency_ttl_secs: u64,
+    pub oidc_enabled: bool,
+    pub oidc_client_id: String,
+    pub oidc_client_secret: String,
+    pub oidc_auth_url: String,
+    pub oidc_token_url: String,
+    pub oidc_userinfo_url: String,
+    pub oidc_redirect_url: String,
+    pub oidc_scopes: String,
+    pub oidc_state_ttl_secs: u64,
 }
 
 impl Config {
@@ -56,6 +86,8 @@ impl Config {
             std::env::var("SSMA_BACKEND_INTERNAL_TOKEN").unwrap_or_default();
         let auth_cookie_name =
             std::env::var("SSMA_AUTH_COOKIE").unwrap_or_else(|_| "ssma_session".to_string());
+        let refresh_cookie_name =
+            std::env::var("SSMA_REFRESH_COOKIE").unwrap_or_else(|_| "ssma_refresh".to_string());
         let anonymous_cookie_name =
             std::env::var("SSMA_ANON_COOKIE").unwrap_or_else(|_| "ssma_anon".to_string());
         let auth_jwt_secret = std::env::var("SSMA_AUTH_JWT_SECRET")
@@ -118,10 +150,10 @@ impl Config {
         let user_store_path = std::env::var("SSMA_USER_STORE")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./data/users.json"));
-        let jwt_issuer = std::env::var("SSMA_JWT_ISSUER")
-            .unwrap_or_else(|_| "ssma-auth-service".to_string());
-        let jwt_audience = std::env::var("SSMA_JWT_AUDIENCE")
-            .unwrap_or_else(|_| "csma-clients".to_string());
+        let jwt_issuer =
+            std::env::var("SSMA_JWT_ISSUER").unwrap_or_else(|_| "ssma-auth-service".to_string());
+        let jwt_audience =
+            std::env::var("SSMA_JWT_AUDIENCE").unwrap_or_else(|_| "csma-clients".to_string());
         let access_ttl_ms = std::env::var("SSMA_ACCESS_TTL_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -129,10 +161,27 @@ impl Config {
         let auth_cookie_secure = std::env::var("SSMA_AUTH_COOKIE_SECURE")
             .map(|v| v == "true")
             .unwrap_or(true);
-        let auth_cookie_same_site = std::env::var("SSMA_AUTH_COOKIE_SAMESITE")
-            .unwrap_or_else(|_| "Lax".to_string());
-        let allowed_origins =
-            std::env::var("SSMA_ALLOWED_ORIGINS").unwrap_or_default();
+        let auth_cookie_same_site =
+            std::env::var("SSMA_AUTH_COOKIE_SAMESITE").unwrap_or_else(|_| "Lax".to_string());
+        let auth_refresh_enabled = std::env::var("SSMA_AUTH_REFRESH_ENABLED")
+            .map(|v| v == "true")
+            .unwrap_or(true);
+        let refresh_ttl_ms = std::env::var("SSMA_REFRESH_TTL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(2_592_000_000);
+        let auth_require_email_verification = std::env::var("SSMA_AUTH_REQUIRE_EMAIL_VERIFICATION")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        let email_verify_ttl_ms = std::env::var("SSMA_EMAIL_VERIFY_TTL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(86_400_000);
+        let password_reset_ttl_ms = std::env::var("SSMA_PASSWORD_RESET_TTL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(3_600_000);
+        let allowed_origins = std::env::var("SSMA_ALLOWED_ORIGINS").unwrap_or_default();
         let optimistic_rework_window_ms = std::env::var("SSMA_OPTIMISTIC_REWORK_WINDOW_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -158,6 +207,66 @@ impl Config {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(5000);
+        let query_max_body_bytes = std::env::var("SSMA_QUERY_MAX_BODY_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(1_048_576);
+        let form_max_body_bytes = std::env::var("SSMA_FORM_MAX_BODY_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(131_072);
+        let webhook_max_body_bytes = std::env::var("SSMA_WEBHOOK_MAX_BODY_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(262_144);
+        let form_rate_window_ms = std::env::var("SSMA_FORM_RATE_WINDOW_MS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(60_000);
+        let form_rate_max = std::env::var("SSMA_FORM_RATE_MAX")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(20);
+        let form_captcha_mode =
+            std::env::var("SSMA_FORM_CAPTCHA_MODE").unwrap_or_else(|_| "disabled".to_string());
+        let form_captcha_verify_url =
+            std::env::var("SSMA_FORM_CAPTCHA_VERIFY_URL").unwrap_or_default();
+        let form_captcha_timeout_ms = std::env::var("SSMA_FORM_CAPTCHA_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(3000);
+        let form_csrf_mode =
+            std::env::var("SSMA_FORM_CSRF_MODE").unwrap_or_else(|_| "disabled".to_string());
+        let form_csrf_cookie_name =
+            std::env::var("SSMA_FORM_CSRF_COOKIE").unwrap_or_else(|_| "ssma_csrf".to_string());
+        let form_csrf_header_name =
+            std::env::var("SSMA_FORM_CSRF_HEADER").unwrap_or_else(|_| "x-csrf-token".to_string());
+        let webhook_verify_mode =
+            std::env::var("SSMA_WEBHOOK_VERIFY_MODE").unwrap_or_else(|_| "disabled".to_string());
+        let webhook_verify_url = std::env::var("SSMA_WEBHOOK_VERIFY_URL").unwrap_or_default();
+        let webhook_verify_timeout_ms = std::env::var("SSMA_WEBHOOK_VERIFY_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(3000);
+        let webhook_idempotency_ttl_secs = std::env::var("SSMA_WEBHOOK_IDEMPOTENCY_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(86_400);
+        let oidc_enabled = std::env::var("SSMA_OIDC_ENABLED")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        let oidc_client_id = std::env::var("SSMA_OIDC_CLIENT_ID").unwrap_or_default();
+        let oidc_client_secret = std::env::var("SSMA_OIDC_CLIENT_SECRET").unwrap_or_default();
+        let oidc_auth_url = std::env::var("SSMA_OIDC_AUTH_URL").unwrap_or_default();
+        let oidc_token_url = std::env::var("SSMA_OIDC_TOKEN_URL").unwrap_or_default();
+        let oidc_userinfo_url = std::env::var("SSMA_OIDC_USERINFO_URL").unwrap_or_default();
+        let oidc_redirect_url = std::env::var("SSMA_OIDC_REDIRECT_URL").unwrap_or_default();
+        let oidc_scopes = std::env::var("SSMA_OIDC_SCOPES")
+            .unwrap_or_else(|_| "openid profile email".to_string());
+        let oidc_state_ttl_secs = std::env::var("SSMA_OIDC_STATE_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300);
         Self {
             host,
             port,
@@ -165,6 +274,7 @@ impl Config {
             backend_url,
             backend_internal_token,
             auth_cookie_name,
+            refresh_cookie_name,
             anonymous_cookie_name,
             auth_jwt_secret,
             require_auth_for_writes,
@@ -186,6 +296,11 @@ impl Config {
             access_ttl_ms,
             auth_cookie_secure,
             auth_cookie_same_site,
+            auth_refresh_enabled,
+            refresh_ttl_ms,
+            auth_require_email_verification,
+            email_verify_ttl_ms,
+            password_reset_ttl_ms,
             allowed_origins,
             optimistic_rework_window_ms,
             optimistic_rework_max,
@@ -194,6 +309,30 @@ impl Config {
             optimistic_max_entries,
             log_relay_url,
             backend_timeout_ms,
+            query_max_body_bytes,
+            form_max_body_bytes,
+            webhook_max_body_bytes,
+            form_rate_window_ms,
+            form_rate_max,
+            form_captcha_mode,
+            form_captcha_verify_url,
+            form_captcha_timeout_ms,
+            form_csrf_mode,
+            form_csrf_cookie_name,
+            form_csrf_header_name,
+            webhook_verify_mode,
+            webhook_verify_url,
+            webhook_verify_timeout_ms,
+            webhook_idempotency_ttl_secs,
+            oidc_enabled,
+            oidc_client_id,
+            oidc_client_secret,
+            oidc_auth_url,
+            oidc_token_url,
+            oidc_userinfo_url,
+            oidc_redirect_url,
+            oidc_scopes,
+            oidc_state_ttl_secs,
         }
     }
 
@@ -252,12 +391,101 @@ impl Config {
         }
 
         // Validate cookie configuration consistency
-        if self.auth_cookie_secure && !self.allowed_origins.is_empty() && self.allowed_origins != "*" {
+        if self.auth_cookie_secure
+            && !self.allowed_origins.is_empty()
+            && self.allowed_origins != "*"
+        {
             // If secure cookies are enabled, ensure HTTPS is being used
             // This is a warning-level check, not a hard error
             tracing::warn!(
                 "auth_cookie_secure=true with explicit origins - ensure reverse proxy handles HTTPS"
             );
+        }
+
+        if self.auth_refresh_enabled && self.refresh_ttl_ms < self.access_ttl_ms {
+            return Err(
+                "SSMA_REFRESH_TTL_MS should be >= SSMA_ACCESS_TTL_MS when refresh is enabled"
+                    .to_string(),
+            );
+        }
+
+        // Validate form captcha configuration
+        match self.form_captcha_mode.as_str() {
+            "disabled" => {}
+            "external" => {
+                if self.form_captcha_verify_url.is_empty() {
+                    return Err(
+                        "SSMA_FORM_CAPTCHA_VERIFY_URL must be set when SSMA_FORM_CAPTCHA_MODE=external"
+                            .to_string(),
+                    );
+                }
+                if !self.form_captcha_verify_url.starts_with("http://")
+                    && !self.form_captcha_verify_url.starts_with("https://")
+                {
+                    return Err(
+                        "SSMA_FORM_CAPTCHA_VERIFY_URL must start with http:// or https://"
+                            .to_string(),
+                    );
+                }
+            }
+            mode => {
+                return Err(format!(
+                    "Invalid SSMA_FORM_CAPTCHA_MODE '{}': expected 'disabled' or 'external'",
+                    mode
+                ));
+            }
+        }
+
+        match self.form_csrf_mode.as_str() {
+            "disabled" | "double-submit" => {}
+            mode => {
+                return Err(format!(
+                    "Invalid SSMA_FORM_CSRF_MODE '{}': expected 'disabled' or 'double-submit'",
+                    mode
+                ));
+            }
+        }
+
+        match self.webhook_verify_mode.as_str() {
+            "disabled" => {}
+            "external" => {
+                if self.webhook_verify_url.is_empty() {
+                    return Err(
+                        "SSMA_WEBHOOK_VERIFY_URL must be set when SSMA_WEBHOOK_VERIFY_MODE=external"
+                            .to_string(),
+                    );
+                }
+                if !self.webhook_verify_url.starts_with("http://")
+                    && !self.webhook_verify_url.starts_with("https://")
+                {
+                    return Err(
+                        "SSMA_WEBHOOK_VERIFY_URL must start with http:// or https://".to_string(),
+                    );
+                }
+            }
+            mode => {
+                return Err(format!(
+                    "Invalid SSMA_WEBHOOK_VERIFY_MODE '{}': expected 'disabled' or 'external'",
+                    mode
+                ));
+            }
+        }
+
+        if self.oidc_enabled {
+            if self.oidc_client_id.is_empty() {
+                return Err(
+                    "SSMA_OIDC_CLIENT_ID is required when SSMA_OIDC_ENABLED=true".to_string(),
+                );
+            }
+            if self.oidc_auth_url.is_empty()
+                || self.oidc_token_url.is_empty()
+                || self.oidc_redirect_url.is_empty()
+            {
+                return Err(
+                    "SSMA_OIDC_AUTH_URL, SSMA_OIDC_TOKEN_URL, and SSMA_OIDC_REDIRECT_URL are required when SSMA_OIDC_ENABLED=true"
+                        .to_string(),
+                );
+            }
         }
 
         Ok(())

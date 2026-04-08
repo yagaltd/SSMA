@@ -16,6 +16,9 @@ SSMA calls your backend at these routes:
 | `/apply-intents` | POST | Process persisted intents |
 | `/query/:name` | POST | Handle one-shot queries |
 | `/subscribe` | POST | Initialize channel subscription |
+| `/forms/submit` | POST | Process accepted form submissions |
+| `/webhooks/ingest` | POST | Process verified/idempotent webhook events |
+| `/auth/outbox` | POST | Deliver auth lifecycle messages (email verification, password reset) |
 | `/health` | POST | Backend health check |
 
 Base URL: `SSMA_BACKEND_URL`
@@ -151,6 +154,110 @@ SSMA forwards these as SSE events to the client at `/query/:name/stream`.
 }
 ```
 
+## `POST /forms/submit`
+
+### Request
+
+```json
+{
+  "formName": "contact",
+  "payload": {
+    "email": "user@example.com",
+    "message": "Hello"
+  },
+  "meta": {
+    "source": "landing-page"
+  },
+  "context": {
+    "site": "default",
+    "actorKey": "anon:uuid-or-user-id",
+    "connectionId": null,
+    "ip": "203.0.113.10",
+    "userAgent": "Mozilla/5.0",
+    "user": null
+  }
+}
+```
+
+### Response
+
+```json
+{
+  "status": "ok",
+  "accepted": true
+}
+```
+
+## `POST /webhooks/ingest`
+
+### Request
+
+```json
+{
+  "provider": "stripe",
+  "eventId": "evt_123",
+  "eventType": "payment_intent.succeeded",
+  "payload": {
+    "id": "pi_123"
+  },
+  "context": {
+    "site": "default",
+    "actorKey": "webhook:stripe",
+    "connectionId": null,
+    "ip": "203.0.113.10",
+    "userAgent": "Stripe/1.0",
+    "user": null
+  }
+}
+```
+
+### Response
+
+```json
+{
+  "status": "ok"
+}
+```
+
+## `POST /auth/outbox`
+
+Gateway emits auth-delivery events to backend adapter:
+
+### Request
+
+```json
+{
+  "kind": "verify_email",
+  "email": "user@example.com",
+  "payload": {
+    "token": "opaque-token",
+    "expiresAt": 1710000000000,
+    "userId": "uuid",
+    "name": "User"
+  },
+  "context": {
+    "site": "default",
+    "actorKey": "user:uuid",
+    "connectionId": null,
+    "ip": "203.0.113.10",
+    "userAgent": "Mozilla/5.0",
+    "user": { "id": "uuid", "role": "user" }
+  }
+}
+```
+
+`kind` values currently used:
+- `verify_email`
+- `password_reset`
+
+### Response
+
+```json
+{
+  "status": "ok"
+}
+```
+
 ## `POST /health`
 
 ### Request
@@ -254,4 +361,7 @@ When `SSMA_BACKEND_URL` is empty:
 - `applyIntents` → returns `{ results: [] }` (silent no-op)
 - `query` → returns `{ status: "ok", data: null }`
 - `subscribe` → returns `{ status: "ok", snapshot: [], cursor: 0 }`
+- `submitForm` → returns `{ status: "ok", data: null, backend: "unconfigured" }`
+- `ingestWebhook` → returns `{ status: "ok", data: null, backend: "unconfigured" }`
+- `authOutboxEvent` → returns `{ status: "ok", data: null, backend: "unconfigured" }`
 - `health` → returns `{ status: "ok", backend: "unconfigured" }`

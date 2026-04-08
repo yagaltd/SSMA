@@ -11,10 +11,13 @@ Session cookie based auth using `ssma_session` (configurable via `SSMA_AUTH_COOK
 
 ### Auth Flow
 
-1. **Register** → `POST /auth/register` → Argon2id hash → store in JSON file → issue JWT → set cookie
-2. **Login** → `POST /auth/login` → verify password → issue JWT → set cookie
-3. **Logout** → `POST /auth/logout` → clear cookie
-4. **Me** → `GET /auth/me` → decode JWT → return user profile
+1. **Register** → `POST /auth/register` → Argon2id hash → store in JSON file → issue session + refresh cookies
+2. **Login** → `POST /auth/login` → verify password (and optional email verification gate) → issue cookies
+3. **Refresh** → `POST /auth/refresh` → rotate refresh token + issue new session cookie
+4. **Logout** → `POST /auth/logout` → clear session and refresh cookies
+5. **Me** → `GET /auth/me` → decode JWT → return user profile
+6. **Recovery** → `POST /auth/forgot-password` + `POST /auth/reset-password`
+7. **Email verification** → `POST /auth/verify-email` + `POST /auth/resend-verification`
 
 ### Response Shape
 
@@ -29,6 +32,7 @@ All auth endpoints return `{ status: "ok", user: {...} }`:
     "name": "User",
     "role": "user",
     "status": "active",
+    "emailVerified": true,
     "createdAt": 1234567890,
     "updatedAt": 1234567890,
     "lastLoginAt": null
@@ -51,6 +55,9 @@ This envelope matches CSMA's `AuthService` expectation of `response.user`.
 - `SameSite=Lax` — CSRF protection
 - `Secure` — only sent over HTTPS (controlled by `SSMA_AUTH_COOKIE_SECURE`, default `true`)
 - `Path=/`
+- Refresh cookie name: `SSMA_REFRESH_COOKIE` (default `ssma_refresh`)
+
+Auth endpoints also include `x-request-id` for traceability.
 
 ### WS/SSE Auth
 
@@ -107,6 +114,7 @@ All rate limits use in-memory `Mutex<HashMap<String, RateBucket>>`. Acceptable f
 | Limiter | Config | Default |
 |---------|--------|---------|
 | Global HTTP | `SSMA_RATE_WINDOW_MS` / `SSMA_RATE_MAX` | 120 req / 60s |
+| Forms submit | `SSMA_FORM_RATE_WINDOW_MS` / `SSMA_FORM_RATE_MAX` | 20 req / 60s |
 | Channel subscribe | `SSMA_OPTIMISTIC_CHANNEL_WINDOW_MS` / `SSMA_OPTIMISTIC_CHANNEL_MAX` | 8 / 10s |
 | Rework/undo | `SSMA_OPTIMISTIC_REWORK_WINDOW_MS` / `SSMA_OPTIMISTIC_REWORK_MAX` | 20 / 60s |
 | WS backpressure | `SSMA_WS_MAX_BUFFERED_BYTES` | 256 KB |
@@ -115,6 +123,31 @@ Rate-limited responses:
 - HTTP: `429 Too Many Requests` with `RATE_LIMITED` error code
 - WS: `{ type: "error", code: "RATE_LIMITED" }`
 - Channel subscribe: `{ type: "channel.ack", status: "error", code: "RATE_LIMITED" }`
+
+## Form Anti-Bot Policy
+
+Route: `POST /forms/submit`
+
+- Honeypot:
+  - non-empty honeypot field returns `202 accepted`
+  - request is dropped and not forwarded to backend
+- Captcha:
+  - `SSMA_FORM_CAPTCHA_MODE=disabled` bypasses captcha verification
+  - `SSMA_FORM_CAPTCHA_MODE=external` requires `captchaToken`
+  - failed/unreachable verifier is fail-closed (`CAPTCHA_VERIFICATION_FAILED`)
+
+## Webhook Security Policy
+
+Route: `POST /webhooks/:provider`
+
+- Verification modes:
+  - `SSMA_WEBHOOK_VERIFY_MODE=disabled`: webhook payload must include `eventId` and `eventType`
+  - `SSMA_WEBHOOK_VERIFY_MODE=external`: webhook is validated by external verifier service
+- Idempotency:
+  - event keys are tracked in-memory for `SSMA_WEBHOOK_IDEMPOTENCY_TTL_SECS`
+  - duplicate events are accepted but not re-forwarded
+- Request tracing:
+  - `x-request-id` is accepted/generated and forwarded to backend
 
 ## CORS
 

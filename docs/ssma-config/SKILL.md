@@ -24,6 +24,8 @@ All config is loaded from environment variables in `config.rs` → `Config::from
 | `SSMA_BACKEND_URL` | (empty) | Backend base URL |
 | `SSMA_BACKEND_INTERNAL_TOKEN` | (empty) | Token for `/internal/*` routes |
 | `SSMA_BACKEND_TIMEOUT_MS` | `5000` | Backend request timeout |
+| `SSMA_QUERY_MAX_BODY_BYTES` | `1048576` | Max request body for query-family routes |
+| `SSMA_WEBHOOK_MAX_BODY_BYTES` | `262144` | Max request body for webhook routes |
 
 ### Authentication
 
@@ -31,12 +33,18 @@ All config is loaded from environment variables in `config.rs` → `Config::from
 |----------|---------|-------------|
 | `SSMA_AUTH_JWT_SECRET` | ⚠️ insecure | JWT signing secret (**MUST** set in prod) |
 | `SSMA_AUTH_COOKIE` | `ssma_session` | Session cookie name |
+| `SSMA_REFRESH_COOKIE` | `ssma_refresh` | Refresh cookie name |
 | `SSMA_ANON_COOKIE` | `ssma_anon` | Anonymous session cookie name |
 | `SSMA_JWT_ISSUER` | `ssma-auth-service` | JWT issuer claim |
 | `SSMA_JWT_AUDIENCE` | `csma-clients` | JWT audience claim |
 | `SSMA_ACCESS_TTL_MS` | `900000` | JWT lifetime (15 min) |
 | `SSMA_AUTH_COOKIE_SECURE` | `true` | Set `Secure` flag on cookies |
 | `SSMA_AUTH_COOKIE_SAMESITE` | `Lax` | Cookie `SameSite` mode |
+| `SSMA_AUTH_REFRESH_ENABLED` | `true` | Enable refresh token flow |
+| `SSMA_REFRESH_TTL_MS` | `2592000000` | Refresh token lifetime (30 days) |
+| `SSMA_AUTH_REQUIRE_EMAIL_VERIFICATION` | `false` | Require verified email before login |
+| `SSMA_EMAIL_VERIFY_TTL_MS` | `86400000` | Email verification token lifetime (24h) |
+| `SSMA_PASSWORD_RESET_TTL_MS` | `3600000` | Password reset token lifetime (1h) |
 
 ### CORS
 
@@ -93,6 +101,43 @@ All config is loaded from environment variables in `config.rs` → `Config::from
 |----------|---------|-------------|
 | `SSMA_LOG_RELAY_URL` | (empty) | Log forwarding endpoint (empty = disabled) |
 
+### Forms
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SSMA_FORM_RATE_WINDOW_MS` | `60000` | Form submission rate window |
+| `SSMA_FORM_RATE_MAX` | `20` | Max form submissions per window (per site+IP bucket) |
+| `SSMA_FORM_MAX_BODY_BYTES` | `131072` | Max request body for `/forms/submit` |
+| `SSMA_FORM_CAPTCHA_MODE` | `disabled` | Captcha mode: `disabled` or `external` |
+| `SSMA_FORM_CAPTCHA_VERIFY_URL` | (empty) | External verifier URL (required when mode is `external`) |
+| `SSMA_FORM_CAPTCHA_TIMEOUT_MS` | `3000` | External verifier timeout |
+| `SSMA_FORM_CSRF_MODE` | `disabled` | CSRF mode for urlencoded forms (`disabled` or `double-submit`) |
+| `SSMA_FORM_CSRF_COOKIE` | `ssma_csrf` | CSRF cookie name |
+| `SSMA_FORM_CSRF_HEADER` | `x-csrf-token` | CSRF header name |
+
+### Webhooks
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SSMA_WEBHOOK_VERIFY_MODE` | `disabled` | Webhook verifier mode (`disabled` or `external`) |
+| `SSMA_WEBHOOK_VERIFY_URL` | (empty) | External verifier endpoint (required in `external` mode) |
+| `SSMA_WEBHOOK_VERIFY_TIMEOUT_MS` | `3000` | Webhook verifier timeout |
+| `SSMA_WEBHOOK_IDEMPOTENCY_TTL_SECS` | `86400` | In-memory dedupe TTL by `provider:eventId` |
+
+### OIDC Bridge
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SSMA_OIDC_ENABLED` | `false` | Enable OIDC bridge endpoints |
+| `SSMA_OIDC_CLIENT_ID` | (empty) | OIDC client id |
+| `SSMA_OIDC_CLIENT_SECRET` | (empty) | OIDC client secret (optional for public clients) |
+| `SSMA_OIDC_AUTH_URL` | (empty) | Provider authorization endpoint |
+| `SSMA_OIDC_TOKEN_URL` | (empty) | Provider token endpoint |
+| `SSMA_OIDC_USERINFO_URL` | (empty) | Provider userinfo endpoint |
+| `SSMA_OIDC_REDIRECT_URL` | (empty) | Redirect URI configured in provider |
+| `SSMA_OIDC_SCOPES` | `openid profile email` | Requested scopes |
+| `SSMA_OIDC_STATE_TTL_SECS` | `300` | PKCE/state store TTL |
+
 ## Deployment
 
 ### Single Instance
@@ -129,6 +174,7 @@ CMD ["ssma-rust"]
 - Ensure proxy supports WebSocket upgrade (`Upgrade: websocket`)
 - Ensure proxy supports SSE streaming (disable buffering)
 - Pass client IP via `X-Forwarded-For` header
+- Terminate TLS and HTTP/2/HTTP/3 at the edge proxy; SSMA runs as internal origin
 
 ### Horizontal Scaling Notes
 

@@ -13,6 +13,8 @@ SSMA is a backend-agnostic realtime gateway written in Rust. It sits between fro
 - Auth and RBAC enforcement
 - Intent persistence and replay
 - Channel subscription fanout
+- Generic form ingress with anti-bot hooks
+- Generic webhook ingress with verification/idempotency hooks
 - Protocol validation
 - Media upload/download (images, audio)
 - RTC signaling coordination
@@ -50,6 +52,8 @@ apps/ssma-rust/
 │   │   ├── admin.rs         # Staff-only channel/intent inspection
 │   │   └── internal.rs      # Backend-to-SSMA event ingestion
 │   └── features/
+│       ├── forms.rs         # Form handling ingress + captcha/honeypot hooks
+│       ├── webhooks.rs      # Webhook verification + dedupe + backend forwarding
 │       ├── logs.rs          # Log relay forwarding
 │       ├── optimistic.rs    # Rework/undo/pending queries
 │       ├── media.rs         # Asset upload/download/delete

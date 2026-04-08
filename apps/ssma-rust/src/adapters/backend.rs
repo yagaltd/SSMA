@@ -82,12 +82,24 @@ impl BackendHttpClient {
         payload: Value,
         context: &BackendContext,
     ) -> Result<Value, reqwest::Error> {
+        self.query_with_request_id(name, payload, context, None)
+            .await
+    }
+
+    pub async fn query_with_request_id(
+        &self,
+        name: &str,
+        payload: Value,
+        context: &BackendContext,
+        request_id: Option<&str>,
+    ) -> Result<Value, reqwest::Error> {
         if !self.is_configured() {
             return Ok(serde_json::json!({ "status": "ok", "data": Value::Null }));
         }
-        self.post_json(
+        self.post_json_with_request_id(
             &format!("/query/{}", urlencoding::encode(name)),
             serde_json::json!({ "payload": payload, "context": context }),
+            request_id,
         )
         .await
     }
@@ -104,6 +116,92 @@ impl BackendHttpClient {
         self.post_json(
             "/subscribe",
             serde_json::json!({ "channel": channel, "params": params, "context": context }),
+        )
+        .await
+    }
+
+    pub async fn submit_form(
+        &self,
+        form_name: &str,
+        payload: Value,
+        meta: Value,
+        context: &BackendContext,
+        request_id: Option<&str>,
+    ) -> Result<Value, reqwest::Error> {
+        if !self.is_configured() {
+            return Ok(serde_json::json!({
+                "status": "ok",
+                "data": Value::Null,
+                "backend": "unconfigured"
+            }));
+        }
+        self.post_json_with_request_id(
+            "/forms/submit",
+            serde_json::json!({
+                "formName": form_name,
+                "payload": payload,
+                "meta": meta,
+                "context": context
+            }),
+            request_id,
+        )
+        .await
+    }
+
+    pub async fn ingest_webhook(
+        &self,
+        provider: &str,
+        event_id: &str,
+        event_type: &str,
+        payload: Value,
+        context: &BackendContext,
+        request_id: Option<&str>,
+    ) -> Result<Value, reqwest::Error> {
+        if !self.is_configured() {
+            return Ok(serde_json::json!({
+                "status": "ok",
+                "data": Value::Null,
+                "backend": "unconfigured"
+            }));
+        }
+        self.post_json_with_request_id(
+            "/webhooks/ingest",
+            serde_json::json!({
+                "provider": provider,
+                "eventId": event_id,
+                "eventType": event_type,
+                "payload": payload,
+                "context": context
+            }),
+            request_id,
+        )
+        .await
+    }
+
+    pub async fn auth_outbox_event(
+        &self,
+        kind: &str,
+        email: &str,
+        payload: Value,
+        context: &BackendContext,
+        request_id: Option<&str>,
+    ) -> Result<Value, reqwest::Error> {
+        if !self.is_configured() {
+            return Ok(serde_json::json!({
+                "status": "ok",
+                "data": Value::Null,
+                "backend": "unconfigured"
+            }));
+        }
+        self.post_json_with_request_id(
+            "/auth/outbox",
+            serde_json::json!({
+                "kind": kind,
+                "email": email,
+                "payload": payload,
+                "context": context
+            }),
+            request_id,
         )
         .await
     }
@@ -127,8 +225,21 @@ impl BackendHttpClient {
     }
 
     async fn post_json(&self, path: &str, payload: Value) -> Result<Value, reqwest::Error> {
+        self.post_json_with_request_id(path, payload, None).await
+    }
+
+    async fn post_json_with_request_id(
+        &self,
+        path: &str,
+        payload: Value,
+        request_id: Option<&str>,
+    ) -> Result<Value, reqwest::Error> {
         let url = format!("{}{}", self.base_url, path);
-        let response = self.client.post(url).json(&payload).send().await?;
+        let mut request = self.client.post(url).json(&payload);
+        if let Some(request_id) = request_id {
+            request = request.header("x-request-id", request_id);
+        }
+        let response = request.send().await?;
         response.json::<Value>().await
     }
 
@@ -139,22 +250,31 @@ impl BackendHttpClient {
         payload: Value,
         context: &BackendContext,
     ) -> Result<BackendStream, reqwest::Error> {
+        self.query_stream_with_request_id(name, payload, context, None)
+            .await
+    }
+
+    pub async fn query_stream_with_request_id(
+        &self,
+        name: &str,
+        payload: Value,
+        context: &BackendContext,
+        request_id: Option<&str>,
+    ) -> Result<BackendStream, reqwest::Error> {
         if !self.is_configured() {
             let stream = futures_util::stream::empty();
             return Ok(Box::pin(stream));
         }
-        let url = format!(
-            "{}/query/{}",
-            self.base_url,
-            urlencoding::encode(name)
-        );
-        let response = self
+        let url = format!("{}/query/{}", self.base_url, urlencoding::encode(name));
+        let mut request = self
             .client
             .post(&url)
             .header("Accept", "application/x-ndjson")
-            .json(&serde_json::json!({ "payload": payload, "context": context, "stream": true }))
-            .send()
-            .await?;
+            .json(&serde_json::json!({ "payload": payload, "context": context, "stream": true }));
+        if let Some(request_id) = request_id {
+            request = request.header("x-request-id", request_id);
+        }
+        let response = request.send().await?;
 
         Ok(Self::ndjson_stream(response.bytes_stream()))
     }

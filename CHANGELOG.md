@@ -5,6 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-04-08
+
+### Added
+
+- Auth lifecycle endpoints:
+  - `POST /auth/refresh`
+  - `POST /auth/forgot-password`
+  - `POST /auth/reset-password`
+  - `POST /auth/verify-email`
+  - `POST /auth/resend-verification`
+- Backend adapter hook: `POST /auth/outbox` for `verify_email` and `password_reset` delivery events.
+- Multipart field parsing support on `POST /forms/submit` (`multipart/form-data`, text fields).
+- New auth config knobs:
+  - `SSMA_REFRESH_COOKIE`
+  - `SSMA_AUTH_REFRESH_ENABLED`
+  - `SSMA_REFRESH_TTL_MS`
+  - `SSMA_AUTH_REQUIRE_EMAIL_VERIFICATION`
+  - `SSMA_EMAIL_VERIFY_TTL_MS`
+  - `SSMA_PASSWORD_RESET_TTL_MS`
+- E2E coverage for refresh, forgot/reset password, email verify/resend, and multipart forms.
+
+### Changed
+
+- Auth responses now consistently include `x-request-id` headers.
+- Register/login/OIDC flows now issue refresh cookies when refresh flow is enabled.
+- Logout and password reset flows clear refresh cookies/tokens.
+
+## [0.4.0] - 2026-04-08
+
+### Added
+
+- Webhook ingress route: `POST /webhooks/:provider`
+- Webhook verification modes: `disabled` and `external`
+- Webhook idempotency window with in-memory dedupe (`provider:eventId`)
+- Backend webhook adapter forwarding: `POST /webhooks/ingest`
+- OIDC bridge routes:
+  - `GET /auth/oidc/start`
+  - `GET /auth/oidc/callback`
+- Request-id handling:
+  - accept/generate `x-request-id`
+  - forward request id to backend adapter calls
+- New E2E coverage:
+  - webhook flows (`e2e_webhooks.rs`)
+  - OIDC bridge (`e2e_oidc.rs`)
+  - urlencoded form + CSRF (`e2e_forms.rs`)
+
+### Changed
+
+- Form ingress now accepts `application/x-www-form-urlencoded` in addition to JSON.
+- Added optional CSRF double-submit enforcement for urlencoded form submissions.
+- Switched media and internal asset content responses to streaming file reads.
+- Added compression and HTTP tracing middleware in transport stack.
+- Added stricter route-level payload controls for forms/webhooks/query families.
+- Expanded deployment docs to make HTTP/2 and HTTP/3 edge-termination guidance explicit.
+
+## [0.3.0] - 2026-04-08
+
+### Added
+
+- Core form-handling route: `POST /forms/submit`
+- Generic anti-bot handling in gateway core:
+  - honeypot hook (silent-drop behavior via `202 accepted`)
+  - captcha verification hook modes (`disabled` and `external`)
+  - dedicated form-rate limiting
+- Backend adapter support for form forwarding:
+  - new backend contract endpoint: `POST /forms/submit`
+- E2E test coverage for form handling:
+  - valid forward path
+  - honeypot drop path
+  - external captcha pass/fail/timeout
+  - form rate-limit enforcement
+  - invalid payload rejection
+
+### Changed
+
+- Updated template docs, config docs, and backend contract docs to include form handling.
+
 ## [0.2.0] - 2026-04-08
 
 ### Added

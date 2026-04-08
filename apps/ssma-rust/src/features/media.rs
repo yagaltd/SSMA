@@ -11,6 +11,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 pub(crate) fn media_type_from_mime(mime: &str) -> Option<&'static str> {
@@ -134,8 +135,14 @@ pub(crate) async fn get_asset_content(
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
     let site = request_site(&headers);
     let record = owned_asset(&state, &asset_id, &site, &actor.actor_key)?;
-    let bytes = std::fs::read(&record.path)
+    let file = tokio::fs::File::open(&record.path)
+        .await
         .map_err(|_| api_error(StatusCode::NOT_FOUND, "ASSET_CONTENT_MISSING"))?;
+    let metadata = tokio::fs::metadata(&record.path)
+        .await
+        .map_err(|_| api_error(StatusCode::NOT_FOUND, "ASSET_CONTENT_MISSING"))?;
+    let stream = ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         CONTENT_TYPE,
@@ -144,10 +151,10 @@ pub(crate) async fn get_asset_content(
     );
     response_headers.insert(
         CONTENT_LENGTH,
-        HeaderValue::from_str(&bytes.len().to_string())
+        HeaderValue::from_str(&metadata.len().to_string())
             .unwrap_or_else(|_| HeaderValue::from_static("0")),
     );
-    Ok((StatusCode::OK, response_headers, bytes))
+    Ok((StatusCode::OK, response_headers, body))
 }
 
 pub(crate) async fn delete_asset(

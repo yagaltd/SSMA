@@ -33,11 +33,14 @@ apps/ssma-rust/
 │   └── features/
 │       └── media.rs     # mod tests {} — MIME type detection
 ├── tests/
-│   ├── e2e_auth.rs          # Register, login, logout, /me
+│   ├── e2e_auth.rs          # Register/login/logout/me + refresh/reset/verify flows
 │   ├── e2e_admin.rs         # Admin endpoints (staff+)
 │   ├── e2e_cors.rs          # CORS headers
 │   ├── e2e_health.rs        # Health endpoint
 │   ├── e2e_logs.rs          # Log relay forwarding
+│   ├── e2e_forms.rs         # Form ingress, honeypot, captcha hooks
+│   ├── e2e_webhooks.rs      # Webhook verify/idempotency/forwarding
+│   ├── e2e_oidc.rs          # OIDC start/callback bridge
 │   ├── e2e_optimistic_ops.rs # Rework, undo, pending
 │   ├── e2e_scenarios.rs     # Full integration scenarios
 │   ├── e2e_ws.rs            # WebSocket handler tests

@@ -11,6 +11,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 pub(crate) fn publish_backend_event(state: &Arc<AppState>, event: &Value) {
@@ -268,8 +269,14 @@ pub(crate) async fn get_internal_asset_content(
     purge_expired_runtime_state(&state);
     ensure_backend_token(&headers, &state.config)?;
     let record = internal_asset(&state, &asset_id)?;
-    let bytes = std::fs::read(&record.path)
+    let file = tokio::fs::File::open(&record.path)
+        .await
         .map_err(|_| api_error(StatusCode::NOT_FOUND, "ASSET_CONTENT_MISSING"))?;
+    let metadata = tokio::fs::metadata(&record.path)
+        .await
+        .map_err(|_| api_error(StatusCode::NOT_FOUND, "ASSET_CONTENT_MISSING"))?;
+    let stream = ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         CONTENT_TYPE,
@@ -278,10 +285,10 @@ pub(crate) async fn get_internal_asset_content(
     );
     response_headers.insert(
         CONTENT_LENGTH,
-        HeaderValue::from_str(&bytes.len().to_string())
+        HeaderValue::from_str(&metadata.len().to_string())
             .unwrap_or_else(|_| HeaderValue::from_static("0")),
     );
-    Ok((StatusCode::OK, response_headers, bytes))
+    Ok((StatusCode::OK, response_headers, body))
 }
 
 pub(crate) async fn delete_internal_asset(
