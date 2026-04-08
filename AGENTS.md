@@ -1,131 +1,60 @@
-SSMA is a backend-agnostic realtime gateway. It owns:
-- WebSocket and SSE transport
-- replay and invalidation fanout
-- auth and RBAC enforcement
-- optimistic intent persistence
-- backend adapter calls
-- protocol validation and conformance
+# AGENTS.md
 
-## Runtime Map
+Read before changing code.
 
-- JS runtime: `apps/ssma-js`
-- Rust runtime: `apps/ssma-rust`
-- Shared contracts: `packages/ssma-protocol/contracts`
-- Shared vectors: `packages/ssma-protocol/vectors`
-- Template manifests: `templates/`
+## What SSMA Is
 
-Important files:
-- `apps/ssma-js/src/app.js`
-- `apps/ssma-js/src/services/optimistic/SyncGateway.js`
-- `apps/ssma-js/src/services/optimistic/OptimisticEventHub.js`
-- `apps/ssma-js/src/backend/BackendHttpClient.js`
-- `apps/ssma-rust/src/gateway.rs`
-- `apps/ssma-rust/src/backend.rs`
-- `apps/ssma-rust/src/runtime.rs`
+Rust gateway between frontend clients and business backend. Owns transport, auth, persistence, fanout. Does not own business logic.
 
-## Read First
+## Docs
 
-Before changing behavior, read:
-- `docs/index.md`
-- `docs/architecture/backend-interface.md`
-- `docs/protocol/wire-protocol.md`
-- `docs/security/auth.md`
-- `docs/security/rbac.md`
-- `docs/guides/SSMA-RUNTIME.md`
+Each doc covers a domain. Read relevant doc before changes:
 
-If touching channels or fanout, also read:
-- `docs/guides/SSMA-OPTIMISTIC-SYNC.md`
-- `docs/api/streaming.md`
+- `docs/ssma-overview/SKILL.md` — architecture, code map, conventions
+- `docs/ssma-protocol/SKILL.md` — wire protocol, contracts, validation
+- `docs/ssma-security/SKILL.md` — auth, RBAC, rate limits, CORS
+- `docs/ssma-transport/SKILL.md` — HTTP, WS, SSE endpoints
+- `docs/ssma-optimistic/SKILL.md` — intent store, replay, fanout
+- `docs/ssma-backend/SKILL.md` — backend adapter contract
+- `docs/ssma-config/SKILL.md` — env vars, deployment
+- `docs/ssma-testing/SKILL.md` — how to test
+
+## Code Map
+
+```
+apps/ssma-rust/src/
+├── main.rs              Entry point
+├── config.rs            Config::from_env()
+├── protocol.rs          JSON schema validation
+├── domain/runtime.rs    IntentStore
+├── adapters/backend.rs  BackendHttpClient
+├── transport/           AppState, router, WS/SSE/auth/admin/internal
+└── features/            optimistic, media, rtc, logs
+```
 
 ## Canonical Truths
 
-Assume these are intentional unless the task changes them:
-- JS and Rust runtimes should stay behaviorally aligned.
-- `ssma_session` is the session token cookie.
-- auth identity comes from the verified session token, not a separate role cookie.
-- guest access is valid for some flows.
-- backend context is canonical camelCase JSON:
-  - `site`
-  - `connectionId`
-  - `ip`
-  - `userAgent`
-  - `user: { id, role } | null`
-- `channel.snapshot`, `channel.replay`, and `channel.invalidate` preserve subscription `params`.
-- `channel.invalidate` targets one `channel`, not `channels[]`.
-- SSE and WS island invalidations must both enforce RBAC.
-- shutdown must stop sockets, listeners, and reconnect loops cleanly.
+- `ssma_session` = session cookie name
+- Auth identity from JWT, not separate role cookie
+- Guest access valid for some flows
+- Backend context: `{ site, connectionId, ip, userAgent, user: { id, role } | null }`
+- `channel.snapshot`, `channel.replay`, `channel.invalidate` preserve `params`
+- `channel.invalidate` targets one `channel`, not `channels[]`
+- Auth endpoints return `{ status: "ok", user: {...} }` envelope
+- `/query/:name` = JSON, `/query/:name/stream` = SSE NDJSON
+- Shutdown must stop sockets, listeners, reconnect loops
 
 ## Working Rules
 
-Use this order for implementation tasks:
-1. Implement
-2. Verify
-3. Update docs
-4. Commit
+1. Read relevant doc
+2. Implement
+3. `cargo test`
+4. Update doc if behavior changes
+5. Commit (never broken or undocumented)
 
-Do not commit broken or undocumented behavior.
-Breaking changes are acceptable in this development phase.
-Do not add legacy fallback logic unless explicitly requested.
+## Commands
 
-## Testing Rules
-
-Prefer real unit and E2E coverage over mock-heavy tests.
-When behavior changes, run the smallest relevant test set.
-
-Useful commands:
-- `npm run test:js`
-- `npm run test:conformance`
-- `npm run test:rust`
-- `npm run validate:templates`
-- `npm run check:docs`
-- `npm --prefix apps/ssma-js exec -- vitest run tests/<file>.test.js`
-- `cd apps/ssma-rust && cargo test --test <name> -- --nocapture`
-
-If Rust tests live inside source files, keep them in `mod tests {}` at the bottom.
-
-## Documentation Rules
-
-When behavior changes, update the relevant docs in `docs/`.
-At minimum consider:
-- `docs/architecture/backend-interface.md`
-- `docs/protocol/wire-protocol.md`
-- `docs/security/auth.md`
-- `docs/security/rbac.md`
-- `docs/api/streaming.md`
-- `docs/guides/SSMA-OPTIMISTIC-SYNC.md`
-- `README.md`
-
-## Template Rules
-
-This repo is also a template source.
-That means:
-- keep guidance generic enough for scaffolded projects
-- prefer contract-first language over repo-local assumptions
-- keep ecosystem addons optional
-
-Do not turn SSMA core into:
-- a provider-specific backend framework
-- a Tauri-only transport layer
-- a one-runtime-only feature set
-
-## Ecosystem Direction
-
-Current direction:
-- `ssma-backend-starter`: good as an optional addon, not core
-- Tauri support: integration/template first
-- no new CSMA Tauri transport module unless the architecture deliberately moves to Tauri IPC
-
-See:
-- `roadmap.md`
-- `ssma_backend_starter.md`
-- `ssma_tauri.md`
-
-## Safety Checks
-
-Before changing behavior:
-- inspect code
-- inspect docs
-- inspect tests
-
-Do not silently drift JS and Rust apart.
-Do not add a new contract shape in only one runtime.
+```bash
+cd apps/ssma-rust && cargo test -- --nocapture
+cd apps/ssma-rust && cargo test --test <name> -- --nocapture
+```

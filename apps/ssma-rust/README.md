@@ -1,30 +1,28 @@
 # SSMA-Rust
 
-This directory contains the Rust optimistic gateway implementation for SSMA protocol parity.
+This directory contains the active Rust runtime for SSMA: a backend-agnostic realtime gateway.
 
 ## Current state
 
 - Runnable Axum gateway runtime
+- Public query endpoint `/query/:name`
+- Public streaming query endpoint `/query/:name/stream`
 - WS endpoint `/optimistic/ws` and SSE endpoint `/optimistic/events`
+- Health endpoint `/health` and readiness endpoint `/ready`
 - Metrics endpoint `/optimistic/metrics`
 - Internal backend event ingest endpoint `/internal/backend/events`
+- Public media asset routes `/media/assets/*`
+- Public RTC signaling routes `/rtc/sessions*`
+- Backend asset routes `/internal/assets/*`
 - Strict inbound message validation via shared schemas in `../../packages/ssma-protocol/contracts`
 - File-backed intent store with `(site,id)` dedupe and monotonic `log_seq`
 - Backend HTTP client methods (`apply_intents`, `query`, `subscribe`, `health`)
 - Channel subscription registry and WS `channel.invalidate` fanout
 - Protected-channel RBAC checks + global/channel rate limiting
 - Structured server-event counters in metrics
+- Graceful shutdown and WS backpressure protection
 - Rust conformance runtime tests replaying shared vectors
-- Rust E2E scenario suite covering handshake, write/ack/invalidate, idempotency, auth reject, channel snapshot, and subprotocol mismatch
-
-## Planned parity milestones
-
-1. Implement WS endpoint `/optimistic/ws`
-2. Implement SSE endpoint `/optimistic/events`
-3. Add strict JSON schema validation for inbound frames
-4. Add intent store (sqlite or file)
-5. Add backend HTTP client (`applyIntents`, `query`, `subscribe`, `health`)
-6. Run shared vector conformance suite
+- Rust E2E scenario suite covering handshake, write/ack/invalidate, idempotency, auth reject, channel snapshot, readiness, shutdown, and streaming
 
 ## Environment
 
@@ -53,8 +51,12 @@ This directory contains the Rust optimistic gateway implementation for SSMA prot
    - `cargo run`
 5. Check health:
    - `curl http://127.0.0.1:5050/health`
-6. Check metrics:
+6. Check readiness:
+   - `curl http://127.0.0.1:5050/ready`
+7. Check metrics:
    - `curl http://127.0.0.1:5050/optimistic/metrics`
+8. Query backend through gateway:
+   - `curl -X POST http://127.0.0.1:5050/query/example -H 'content-type: application/json' -d '{"payload":{}}'`
 
 ## Local Validation Commands
 
@@ -63,15 +65,14 @@ From `apps/ssma-rust/`:
 - Unit + conformance + E2E tests:
   - `cargo test -- --nocapture`
 
-From repository root:
-
-- JS conformance and docs checks used by CI:
-  - `npm --prefix apps/ssma-js run check:docs`
-  - `npm --prefix apps/ssma-js run test:conformance`
-
 ## Notes
 
 - In restricted/offline environments, `cargo` may fail to download crates from `crates.io`.
 - WS endpoint: `/optimistic/ws`
 - SSE endpoint: `/optimistic/events`
+- Public query endpoint: `/query/:name`
+- Public streaming query endpoint: `/query/:name/stream`
+- Public media routes: `/media/assets`, `/media/assets/:asset_id`, `/media/assets/:asset_id/content`
+- Public RTC signaling routes: `/rtc/sessions`, `/rtc/sessions/:session_id/signals`
 - Backend event ingest endpoint: `/internal/backend/events`
+- Backend asset routes: `/internal/assets`, `/internal/assets/:asset_id`, `/internal/assets/:asset_id/content`

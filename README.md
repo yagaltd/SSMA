@@ -1,122 +1,144 @@
-# SSMA (Server-Side Microservices Architecture)
+# SSMA
 
-SSMA is a backend-agnostic realtime gateway implemented in both JavaScript and Rust.
+Backend-agnostic realtime gateway in Rust.
 
-It sits between frontend clients and your business backend, and owns:
-- WebSocket and SSE transport
-- replay and invalidation fanout
-- auth and RBAC enforcement
-- optimistic intent persistence
-- backend adapter calls
-- protocol validation and conformance
+Sits between frontend clients and your business backend. Owns transport, auth, persistence, fanout. Does not own business logic.
 
-SSMA does not replace your application backend.
-It provides the gateway contract and runtime behavior around it.
+## What SSMA Does
 
-## Runtimes
-
-- `apps/ssma-js`: Node.js runtime
-- `apps/ssma-rust`: Rust runtime
-- `packages/ssma-protocol`: shared contracts and vectors
-
-## Core Contract
-
-The canonical sources of truth are:
-- [`docs/architecture/backend-interface.md`](docs/architecture/backend-interface.md)
-- [`docs/protocol/wire-protocol.md`](docs/protocol/wire-protocol.md)
-- [`docs/security/auth.md`](docs/security/auth.md)
-- [`docs/security/rbac.md`](docs/security/rbac.md)
-
-If code, tests, and docs diverge, align to the contract docs and update the rest.
+- WebSocket + SSE transport
+- Auth + RBAC enforcement
+- Optimistic intent persistence + replay
+- Channel subscription fanout
+- Media upload/download
+- RTC signaling coordination
+- Backend adapter forwarding
+- Protocol validation
 
 ## Quick Start
-
-From the repo root:
-
-```bash
-npm install
-npm run dev:js
-```
-
-For the Rust runtime:
 
 ```bash
 cd apps/ssma-rust
 cargo run
 ```
 
-## Common Commands
+Requires `SSMA_AUTH_JWT_SECRET` in production. See `apps/ssma-rust/.env.example`.
+
+## Single-Node Production
+
+SSMA core now targets a clean single-node gateway deployment:
+- file-backed optimistic intent persistence
+- file-backed user store
+- `/ready` for operator readiness checks
+- bounded backend request timeouts
+- graceful shutdown for WS/SSE clients
+- WS backpressure protection
+
+Recommended deployment model:
+1. run behind HTTPS reverse proxy
+2. keep `SSMA_AUTH_COOKIE_SECURE=true`
+3. set strong `SSMA_AUTH_JWT_SECRET`
+4. mount persistent `./data/` storage
+5. treat SSMA as gateway only; business persistence stays in your backend
+
+Out of scope for SSMA core:
+- opinionated SQLite/Postgres business backend
+- admin product UI
+- durable business workflows
+
+Those belong in future `examples/`.
+
+## Commands
 
 ```bash
-npm run dev:js
-npm run start:js
-npm run test:js
-npm run test:conformance
-npm run run:e2e
-npm run test:rust
-npm run validate:templates
+cargo test --manifest-path apps/ssma-rust/Cargo.toml -- --nocapture
+cargo test --manifest-path apps/ssma-rust/Cargo.toml --test <name> -- --nocapture
 ```
 
-Targeted runs:
+## Project Structure
 
-```bash
-npm --prefix apps/ssma-js exec -- vitest run tests/<file>.test.js
-cd apps/ssma-rust && cargo test --test <name> -- --nocapture
+```
+apps/ssma-rust/          Gateway binary
+├── src/
+│   ├── main.rs          Entry point
+│   ├── config.rs        Config::from_env()
+│   ├── protocol.rs      JSON schema validation
+│   ├── domain/runtime.rs IntentStore (persist, dedupe, replay)
+│   ├── adapters/backend.rs BackendHttpClient (adapter calls)
+│   ├── transport/       Inbound HTTP/WS/SSE transport
+│   └── features/        Feature handlers (media, rtc, logs, optimistic)
+└── tests/               E2E + unit tests
+
+packages/ssma-protocol/  Shared contracts + vectors
+├── contracts/           JSON schemas
+└── vectors/             Golden conformance vectors
+
+docs/                  AI-agent instructions
+├── ssma-overview/       Architecture, code map
+├── ssma-protocol/       Wire protocol, contracts
+├── ssma-security/       Auth, RBAC, rate limits
+├── ssma-transport/      HTTP, WS, SSE endpoints
+├── ssma-optimistic/     Intent store, replay, fanout
+├── ssma-backend/        Backend adapter contract
+├── ssma-config/         Env vars, deployment
+└── ssma-testing/        How to write tests
 ```
 
-## Repository Map
+## Docs
 
-| Path | Purpose |
-| --- | --- |
-| `apps/ssma-js/src/app.js` | JS runtime composition root |
-| `apps/ssma-js/src/services/optimistic/SyncGateway.js` | JS WebSocket gateway |
-| `apps/ssma-js/src/services/optimistic/OptimisticEventHub.js` | JS SSE fanout |
-| `apps/ssma-js/src/backend/BackendHttpClient.js` | JS backend adapter client |
-| `apps/ssma-rust/src/gateway.rs` | Rust gateway transport and fanout |
-| `apps/ssma-rust/src/backend.rs` | Rust backend adapter client |
-| `apps/ssma-rust/src/runtime.rs` | Rust config and intent store |
-| `packages/ssma-protocol/contracts` | JSON contracts |
-| `packages/ssma-protocol/vectors` | shared protocol vectors |
-| `templates/` | CLI scaffold manifests |
-| `docs/` | architecture, API, security, operations, testing |
+Read before changing code:
 
-## Documentation
+| Skill | Covers |
+|-------|--------|
+| `ssma-overview` | Architecture, module layout, conventions |
+| `ssma-protocol` | Wire protocol, contracts, schema validation |
+| `ssma-security` | Auth, RBAC, rate limits, CORS |
+| `ssma-transport` | HTTP endpoints, WS, SSE, admin APIs |
+| `ssma-optimistic` | Intent store, replay, fanout, channels |
+| `ssma-backend` | Backend adapter contract, media, events |
+| `ssma-config` | Env vars, deployment, operations |
+| `ssma-testing` | How to write and run tests |
 
-Start here:
-- [`docs/index.md`](docs/index.md)
-- [`docs/README.md`](docs/README.md)
+## Gateway Endpoints
 
-Recommended reading:
-- [`docs/guides/SSMA-IN-A-NUTSHELL.md`](docs/guides/SSMA-IN-A-NUTSHELL.md)
-- [`docs/guides/SSMA-RUNTIME.md`](docs/guides/SSMA-RUNTIME.md)
-- [`docs/guides/SSMA-OPTIMISTIC-SYNC.md`](docs/guides/SSMA-OPTIMISTIC-SYNC.md)
-- [`docs/api/streaming.md`](docs/api/streaming.md)
-- [`docs/operations/config.md`](docs/operations/config.md)
+### Transport
+- `GET /health`
+- `GET /ready`
+- `GET /optimistic/metrics`
+- `GET /optimistic/ws` (WebSocket)
+- `GET /optimistic/events` (SSE)
 
-## Templates
+### Auth
+- `POST /auth/register`
+- `POST /auth/login`
+- `POST /auth/logout`
+- `GET /auth/me`
 
-Available template manifests:
-- `templates/js-gateway/template.manifest.json`
-- `templates/rust-gateway/template.manifest.json`
+### Query
+- `POST /query/:name` (JSON)
+- `POST /query/:name/stream` (SSE)
 
-Validate templates with:
+### Media
+- `POST /media/assets`
+- `GET /media/assets/:assetId`
+- `GET /media/assets/:assetId/content`
+- `DELETE /media/assets/:assetId`
 
-```bash
-npm run validate:templates
-```
+### RTC
+- `POST /rtc/sessions`
+- `POST /rtc/sessions/:sessionId/signals`
 
-## Ecosystem Notes
+### Admin (staff+)
+- `GET /admin/optimistic/channels`
+- `GET /admin/optimistic/intents`
 
-Current ecosystem direction:
-- backend starter support is good as an optional addon, not SSMA core
-- Tauri support should start as an integration/template path
-- a Tauri-specific transport/runtime should not be added until the architecture explicitly commits to it
+### Internal (backend token)
+- `POST /internal/backend/events`
+- `POST /internal/assets`
+- `GET /internal/assets/:assetId`
+- `GET /internal/assets/:assetId/content`
+- `DELETE /internal/assets/:assetId`
 
-See:
-- [`roadmap.md`](roadmap.md)
-- [`ssma_backend_starter.md`](ssma_backend_starter.md)
-- [`ssma_tauri.md`](ssma_tauri.md)
+## License
 
-## Agent Guidance
-
-If this repo is used as a template for AI-assisted development, read [`AGENTS.md`](AGENTS.md) before making architectural or contract changes.
+MIT

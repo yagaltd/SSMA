@@ -6,7 +6,8 @@ use std::fs;
 use std::path::PathBuf;
 
 pub fn contracts_dir() -> PathBuf {
-    PathBuf::from("../../packages/ssma-protocol/contracts")
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir.join("../../packages/ssma-protocol/contracts")
 }
 
 static VALIDATORS: Lazy<HashMap<String, JSONSchema>> = Lazy::new(|| {

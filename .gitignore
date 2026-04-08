@@ -1,15 +1,15 @@
 node_modules/
-apps/ssma-js/node_modules/
 apps/ssma-rust/target/
-apps/ssma-js/logs/
 .old/
 
 .env
 .env.local
 .env.*.local
 .CSMA/
-ssma_tauri.md
-ssma_backend_starter.md
+
+# Runtime data (mutated at runtime, not for version control)
+apps/ssma-rust/data/*.json
+apps/ssma-rust/data/media/
 roadmap.md
 
 *.log
