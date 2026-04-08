@@ -13,6 +13,8 @@ Sits between frontend clients and your business backend. Owns transport, auth, p
 - Media upload/download
 - RTC signaling coordination
 - Generic form ingress handling (honeypot/captcha hooks + backend forward)
+- Generic webhook ingress handling (verification hook + idempotency + backend forward)
+- OIDC client bridge endpoints
 - Backend adapter forwarding
 - Protocol validation
 
@@ -114,6 +116,8 @@ Read before changing code:
 - `POST /auth/login`
 - `POST /auth/logout`
 - `GET /auth/me`
+- `GET /auth/oidc/start`
+- `GET /auth/oidc/callback`
 
 ### Query
 - `POST /query/:name` (JSON)
@@ -121,6 +125,9 @@ Read before changing code:
 
 ### Forms
 - `POST /forms/submit` (JSON)
+
+### Webhooks
+- `POST /webhooks/:provider`
 
 ### Media
 - `POST /media/assets`

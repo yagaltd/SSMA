@@ -29,7 +29,7 @@ apps/ssma-rust/src/
 ├── domain/runtime.rs    IntentStore
 ├── adapters/backend.rs  BackendHttpClient
 ├── transport/           AppState, router, WS/SSE/auth/admin/internal
-└── features/            optimistic, forms, media, rtc, logs
+└── features/            optimistic, forms, webhooks, media, rtc, logs
 ```
 
 ## Canonical Truths
@@ -41,8 +41,10 @@ apps/ssma-rust/src/
 - `channel.snapshot`, `channel.replay`, `channel.invalidate` preserve `params`
 - `channel.invalidate` targets one `channel`, not `channels[]`
 - Auth endpoints return `{ status: "ok", user: {...} }` envelope
+- OIDC bridge endpoints issue the same `ssma_session` cookie as local auth
 - `/query/:name` = JSON, `/query/:name/stream` = SSE NDJSON
 - `/forms/submit` applies honeypot/captcha hooks and forwards accepted payloads to backend `/forms/submit`
+- `/webhooks/:provider` applies verification/idempotency and forwards accepted events to backend `/webhooks/ingest`
 - Shutdown must stop sockets, listeners, reconnect loops
 
 ## Working Rules

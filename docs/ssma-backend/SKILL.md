@@ -17,6 +17,7 @@ SSMA calls your backend at these routes:
 | `/query/:name` | POST | Handle one-shot queries |
 | `/subscribe` | POST | Initialize channel subscription |
 | `/forms/submit` | POST | Process accepted form submissions |
+| `/webhooks/ingest` | POST | Process verified/idempotent webhook events |
 | `/health` | POST | Backend health check |
 
 Base URL: `SSMA_BACKEND_URL`
@@ -186,6 +187,37 @@ SSMA forwards these as SSE events to the client at `/query/:name/stream`.
 }
 ```
 
+## `POST /webhooks/ingest`
+
+### Request
+
+```json
+{
+  "provider": "stripe",
+  "eventId": "evt_123",
+  "eventType": "payment_intent.succeeded",
+  "payload": {
+    "id": "pi_123"
+  },
+  "context": {
+    "site": "default",
+    "actorKey": "webhook:stripe",
+    "connectionId": null,
+    "ip": "203.0.113.10",
+    "userAgent": "Stripe/1.0",
+    "user": null
+  }
+}
+```
+
+### Response
+
+```json
+{
+  "status": "ok"
+}
+```
+
 ## `POST /health`
 
 ### Request
@@ -290,4 +322,5 @@ When `SSMA_BACKEND_URL` is empty:
 - `query` → returns `{ status: "ok", data: null }`
 - `subscribe` → returns `{ status: "ok", snapshot: [], cursor: 0 }`
 - `submitForm` → returns `{ status: "ok", data: null, backend: "unconfigured" }`
+- `ingestWebhook` → returns `{ status: "ok", data: null, backend: "unconfigured" }`
 - `health` → returns `{ status: "ok", backend: "unconfigured" }`

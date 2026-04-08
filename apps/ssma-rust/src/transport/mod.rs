@@ -16,6 +16,8 @@ use axum::{Json, Router};
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
+use tower_http::compression::CompressionLayer;
+use tower_http::trace::TraceLayer;
 use std::time::Duration;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
@@ -44,6 +46,8 @@ pub struct AppState {
     pub(crate) channel_registry: Arc<Mutex<HashMap<String, ConnectionChannels>>>,
     pub(crate) metrics: Arc<MetricsState>,
     pub(crate) log_client: reqwest::Client,
+    pub(crate) webhook_seen: Arc<Mutex<HashMap<String, u64>>>,
+    pub(crate) oidc_states: Arc<Mutex<HashMap<String, OidcStateRecord>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +149,12 @@ pub(crate) struct ConnectionChannels {
     pub(crate) subscriptions: HashMap<String, ChannelSubscription>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct OidcStateRecord {
+    pub(crate) verifier: String,
+    pub(crate) expires_at_secs: u64,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct WsQuery {
     pub(crate) role: Option<String>,
@@ -243,6 +253,8 @@ pub fn build_state(config: Config) -> Arc<AppState> {
         channel_registry: Arc::new(Mutex::new(HashMap::new())),
         metrics: Arc::new(MetricsState::default()),
         log_client: reqwest::Client::new(),
+        webhook_seen: Arc::new(Mutex::new(HashMap::new())),
+        oidc_states: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -252,32 +264,20 @@ pub fn app(state: Arc<AppState>) -> Router {
     // Longer timeout for long-lived operations like initial subscription (30 seconds)
     let long_timeout = Duration::from_secs(30);
 
-    // Routes with short timeout
-    let short_timeout_routes = Router::new()
+    // Routes with small body limits
+    let small_body_routes = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/query/:name", post(public_query))
         .route("/query/:name/stream", post(public_query_stream))
         .route("/forms/submit", post(crate::features::forms::submit_form))
+        .route("/webhooks/:provider", post(crate::features::webhooks::webhook_ingest))
         .route("/auth/register", post(auth::register))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
-        .route("/media/assets", post(crate::features::media::upload_media))
-        .route(
-            "/media/assets/:asset_id",
-            get(crate::features::media::get_asset_metadata)
-                .delete(crate::features::media::delete_asset),
-        )
-        .route(
-            "/media/assets/:asset_id/content",
-            get(crate::features::media::get_asset_content),
-        )
-        .route("/rtc/sessions", post(crate::features::rtc::create_rtc_session))
-        .route(
-            "/rtc/sessions/:session_id/signals",
-            post(crate::features::rtc::post_rtc_signal),
-        )
+        .route("/auth/oidc/start", get(auth::oidc_start))
+        .route("/auth/oidc/callback", get(auth::oidc_callback))
         .route("/logs/batch", post(crate::features::logs::logs_batch))
         .route("/logs/health", get(crate::features::logs::logs_health))
         .route("/optimistic/metrics", get(metrics))
@@ -296,6 +296,30 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/admin/optimistic/channels", get(admin::admin_channels))
         .route("/admin/optimistic/intents", get(admin::admin_intents))
         .route("/internal/backend/events", post(internal::backend_events_ingest))
+        .layer(DefaultBodyLimit::max(
+            state
+                .config
+                .query_max_body_bytes
+                .max(state.config.form_max_body_bytes)
+                .max(state.config.webhook_max_body_bytes) as usize,
+        ));
+
+    let media_routes = Router::new()
+        .route("/media/assets", post(crate::features::media::upload_media))
+        .route(
+            "/media/assets/:asset_id",
+            get(crate::features::media::get_asset_metadata)
+                .delete(crate::features::media::delete_asset),
+        )
+        .route(
+            "/media/assets/:asset_id/content",
+            get(crate::features::media::get_asset_content),
+        )
+        .route("/rtc/sessions", post(crate::features::rtc::create_rtc_session))
+        .route(
+            "/rtc/sessions/:session_id/signals",
+            post(crate::features::rtc::post_rtc_signal),
+        )
         .route("/internal/assets", post(internal::create_internal_asset))
         .route(
             "/internal/assets/:asset_id",
@@ -304,15 +328,20 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route(
             "/internal/assets/:asset_id/content",
             get(internal::get_internal_asset_content),
-        )
+        ).layer(DefaultBodyLimit::max(
+            state.config.media_max_upload_bytes as usize,
+        ));
+
+    // Routes with short timeout
+    let short_timeout_routes = small_body_routes
+        .merge(media_routes)
         .layer(
             ServiceBuilder::new()
-                .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, short_timeout))
-                .layer(DefaultBodyLimit::max(
-                    state.config.media_max_upload_bytes as usize,
-                ))
                 .layer(cors_layer(&state.config.allowed_origins)),
         )
+        .layer(TraceLayer::new_for_http())
+        .layer(CompressionLayer::new())
+        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, short_timeout))
         .with_state(state.clone());
 
     // Routes with long timeout for WebSocket and SSE upgrade
@@ -482,6 +511,7 @@ async fn public_query(
     Json(body): Json<PublicQueryRequest>,
 ) -> ApiResult<impl IntoResponse> {
     purge_expired_runtime_state(&state);
+    let request_id = request_id_from_headers(&headers);
     let actor = resolve_actor_from_headers(&headers, &state.config, true)
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
     let site = request_site(&headers);
@@ -502,7 +532,7 @@ async fn public_query(
 
     let response = state
         .backend
-        .query(&name, body.payload, &backend_ctx)
+        .query_with_request_id(&name, body.payload, &backend_ctx, Some(&request_id))
         .await
         .map_err(|_| api_error(StatusCode::BAD_GATEWAY, "BACKEND_QUERY_FAILED"))?;
 
@@ -516,6 +546,9 @@ async fn public_query(
         if let Ok(value) = HeaderValue::from_str(&cookie) {
             response_headers.insert(SET_COOKIE, value);
         }
+    }
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response_headers.insert("x-request-id", value);
     }
 
     Ok((StatusCode::OK, response_headers, Json(normalized)))
@@ -531,6 +564,7 @@ async fn public_query_stream(
     use std::convert::Infallible;
 
     purge_expired_runtime_state(&state);
+    let request_id = request_id_from_headers(&headers);
     let actor = resolve_actor_from_headers(&headers, &state.config, true)
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
     let site = request_site(&headers);
@@ -551,7 +585,7 @@ async fn public_query_stream(
 
     let stream = state
         .backend
-        .query_stream(&name, body.payload, &backend_ctx)
+        .query_stream_with_request_id(&name, body.payload, &backend_ctx, Some(&request_id))
         .await
         .map_err(|_| api_error(StatusCode::BAD_GATEWAY, "BACKEND_STREAM_FAILED"))?;
 
@@ -573,6 +607,9 @@ async fn public_query_stream(
         if let Ok(value) = HeaderValue::from_str(&cookie) {
             response_headers.insert(SET_COOKIE, value);
         }
+    }
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response_headers.insert("x-request-id", value);
     }
 
     Ok((StatusCode::OK, response_headers, sse))
@@ -610,6 +647,15 @@ pub(crate) fn connection_ip_from_headers(headers: &HeaderMap) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+pub(crate) fn request_id_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
 }
 
 pub(crate) fn resolve_actor_from_headers(
@@ -743,6 +789,14 @@ pub(crate) fn purge_expired_runtime_state(state: &Arc<AppState>) {
     {
         let mut sessions = state.rtc_sessions.lock().expect("rtc sessions lock");
         sessions.retain(|_, session| session.expires_at_secs > now);
+    }
+    {
+        let mut seen = state.webhook_seen.lock().expect("webhook seen lock");
+        seen.retain(|_, expires_at| *expires_at > now);
+    }
+    {
+        let mut oidc = state.oidc_states.lock().expect("oidc states lock");
+        oidc.retain(|_, record| record.expires_at_secs > now);
     }
 }
 

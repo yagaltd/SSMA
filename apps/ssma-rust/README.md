@@ -8,6 +8,7 @@ This directory contains the active Rust runtime for SSMA: a backend-agnostic rea
 - Public query endpoint `/query/:name`
 - Public streaming query endpoint `/query/:name/stream`
 - Public form ingress endpoint `/forms/submit`
+- Public webhook ingress endpoint `/webhooks/:provider`
 - WS endpoint `/optimistic/ws` and SSE endpoint `/optimistic/events`
 - Health endpoint `/health` and readiness endpoint `/ready`
 - Metrics endpoint `/optimistic/metrics`
@@ -74,6 +75,7 @@ From `apps/ssma-rust/`:
 - Public query endpoint: `/query/:name`
 - Public streaming query endpoint: `/query/:name/stream`
 - Public form ingress endpoint: `/forms/submit`
+- Public webhook ingress endpoint: `/webhooks/:provider`
 - Public media routes: `/media/assets`, `/media/assets/:asset_id`, `/media/assets/:asset_id/content`
 - Public RTC signaling routes: `/rtc/sessions`, `/rtc/sessions/:session_id/signals`
 - Backend event ingest endpoint: `/internal/backend/events`

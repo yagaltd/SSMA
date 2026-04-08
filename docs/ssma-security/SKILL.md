@@ -129,6 +129,19 @@ Route: `POST /forms/submit`
   - `SSMA_FORM_CAPTCHA_MODE=external` requires `captchaToken`
   - failed/unreachable verifier is fail-closed (`CAPTCHA_VERIFICATION_FAILED`)
 
+## Webhook Security Policy
+
+Route: `POST /webhooks/:provider`
+
+- Verification modes:
+  - `SSMA_WEBHOOK_VERIFY_MODE=disabled`: webhook payload must include `eventId` and `eventType`
+  - `SSMA_WEBHOOK_VERIFY_MODE=external`: webhook is validated by external verifier service
+- Idempotency:
+  - event keys are tracked in-memory for `SSMA_WEBHOOK_IDEMPOTENCY_TTL_SECS`
+  - duplicate events are accepted but not re-forwarded
+- Request tracing:
+  - `x-request-id` is accepted/generated and forwarded to backend
+
 ## CORS
 
 Config: `SSMA_ALLOWED_ORIGINS`

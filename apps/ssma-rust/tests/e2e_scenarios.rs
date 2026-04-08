@@ -233,6 +233,14 @@ async fn spawn_gateway_with(
         "ssma-rust-e2e-intents-{}.json",
         uuid::Uuid::new_v4()
     ));
+    config.user_store_path = std::env::temp_dir().join(format!(
+        "ssma-rust-e2e-users-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    config.media_storage_root = std::env::temp_dir().join(format!(
+        "ssma-rust-e2e-media-{}",
+        uuid::Uuid::new_v4()
+    ));
     configure(&mut config);
 
     let state = ssma_rust::gateway::build_state(config);
@@ -1294,6 +1302,14 @@ async fn spawn_gateway_with_shutdown(
     config.require_auth_for_writes = require_auth;
     config.intent_store_path = std::env::temp_dir().join(format!(
         "ssma-rust-e2e-shutdown-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    config.user_store_path = std::env::temp_dir().join(format!(
+        "ssma-rust-e2e-users-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    config.media_storage_root = std::env::temp_dir().join(format!(
+        "ssma-rust-e2e-media-{}",
         uuid::Uuid::new_v4()
     ));
     configure(&mut config);

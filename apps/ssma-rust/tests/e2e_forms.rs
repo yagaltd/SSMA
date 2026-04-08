@@ -339,3 +339,60 @@ async fn forms_invalid_payload_rejected() -> Result<()> {
     backend_handle.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn forms_urlencoded_payload_supported() -> Result<()> {
+    let (backend_url, backend_state, backend_handle) = spawn_backend().await?;
+    let tmp = tempfile::tempdir()?;
+    let config = test_config(tmp.path(), backend_url);
+    let (gateway_base, gateway_handle) = spawn_gateway(config).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/forms/submit", gateway_base))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body("formName=contact&email=user%40example.com&message=hello")
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let submitted = backend_state.submitted.lock().expect("backend lock");
+    assert_eq!(submitted.len(), 1);
+    assert_eq!(submitted[0]["payload"]["email"], "user@example.com");
+    assert_eq!(submitted[0]["payload"]["message"], "hello");
+
+    gateway_handle.abort();
+    backend_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn forms_csrf_double_submit_enforced_for_urlencoded() -> Result<()> {
+    let (backend_url, backend_state, backend_handle) = spawn_backend().await?;
+    let tmp = tempfile::tempdir()?;
+    let mut config = test_config(tmp.path(), backend_url);
+    config.form_csrf_mode = "double-submit".to_string();
+    let (gateway_base, gateway_handle) = spawn_gateway(config).await?;
+
+    let fail = reqwest::Client::new()
+        .post(format!("http://{}/forms/submit", gateway_base))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body("formName=contact&email=user%40example.com")
+        .send()
+        .await?;
+    assert_eq!(fail.status(), StatusCode::FORBIDDEN);
+
+    let ok = reqwest::Client::new()
+        .post(format!("http://{}/forms/submit", gateway_base))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("cookie", "ssma_csrf=token-1")
+        .header("x-csrf-token", "token-1")
+        .body("formName=contact&email=user%40example.com")
+        .send()
+        .await?;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(backend_state.submitted.lock().expect("backend lock").len(), 1);
+
+    gateway_handle.abort();
+    backend_handle.abort();
+    Ok(())
+}

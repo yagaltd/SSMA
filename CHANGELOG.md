@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-08
+
+### Added
+
+- Webhook ingress route: `POST /webhooks/:provider`
+- Webhook verification modes: `disabled` and `external`
+- Webhook idempotency window with in-memory dedupe (`provider:eventId`)
+- Backend webhook adapter forwarding: `POST /webhooks/ingest`
+- OIDC bridge routes:
+  - `GET /auth/oidc/start`
+  - `GET /auth/oidc/callback`
+- Request-id handling:
+  - accept/generate `x-request-id`
+  - forward request id to backend adapter calls
+- New E2E coverage:
+  - webhook flows (`e2e_webhooks.rs`)
+  - OIDC bridge (`e2e_oidc.rs`)
+  - urlencoded form + CSRF (`e2e_forms.rs`)
+
+### Changed
+
+- Form ingress now accepts `application/x-www-form-urlencoded` in addition to JSON.
+- Added optional CSRF double-submit enforcement for urlencoded form submissions.
+- Switched media and internal asset content responses to streaming file reads.
+- Added compression and HTTP tracing middleware in transport stack.
+- Added stricter route-level payload controls for forms/webhooks/query families.
+- Expanded deployment docs to make HTTP/2 and HTTP/3 edge-termination guidance explicit.
+
 ## [0.3.0] - 2026-04-08
 
 ### Added

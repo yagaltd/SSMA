@@ -1,15 +1,17 @@
 use crate::adapters::backend::{BackendContext, BackendUser};
 use crate::transport::{
-    api_error, connection_ip_from_headers, consume_global_rate_limit, emit_server_event,
-    purge_expired_runtime_state, request_site, resolve_actor_from_headers, ApiResult, AppState,
+    api_error, connection_ip_from_headers, consume_global_rate_limit, cookie_value, emit_server_event,
+    purge_expired_runtime_state, request_id_from_headers, request_site, resolve_actor_from_headers, ApiResult, AppState,
 };
 use axum::extract::State;
+use axum::body::Bytes;
 use axum::http::header::SET_COOKIE;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
@@ -25,9 +27,19 @@ pub(crate) struct FormSubmitRequest {
 pub(crate) async fn submit_form(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(body): Json<FormSubmitRequest>,
+    body: Bytes,
 ) -> ApiResult<impl IntoResponse> {
     purge_expired_runtime_state(&state);
+    if body.len() as u64 > state.config.form_max_body_bytes {
+        return Err(api_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE"));
+    }
+    let request_id = request_id_from_headers(&headers);
+    let content_type = headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_lowercase();
+    let body = parse_form_request(&headers, &content_type, &body)?;
 
     if body.form_name.trim().is_empty() {
         return Err(api_error(StatusCode::BAD_REQUEST, "INVALID_FORM_NAME"));
@@ -38,6 +50,7 @@ pub(crate) async fn submit_form(
 
     let actor = resolve_actor_from_headers(&headers, &state.config, true)
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    enforce_csrf_if_needed(&state, &headers, &body, &content_type)?;
     let site = request_site(&headers);
     let ip = connection_ip_from_headers(&headers);
     let ua = headers
@@ -76,6 +89,9 @@ pub(crate) async fn submit_form(
             if let Ok(value) = HeaderValue::from_str(&cookie) {
                 response_headers.insert(SET_COOKIE, value);
             }
+        }
+        if let Ok(value) = HeaderValue::from_str(&request_id) {
+            response_headers.insert("x-request-id", value);
         }
 
         return Ok((
@@ -127,6 +143,7 @@ pub(crate) async fn submit_form(
             body.payload,
             body.meta.unwrap_or_else(|| json!({})),
             &backend_ctx,
+            Some(&request_id),
         )
         .await
         .map_err(|_| api_error(StatusCode::BAD_GATEWAY, "BACKEND_FORM_SUBMIT_FAILED"))?;
@@ -147,6 +164,9 @@ pub(crate) async fn submit_form(
         if let Ok(value) = HeaderValue::from_str(&cookie) {
             response_headers.insert(SET_COOKIE, value);
         }
+    }
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response_headers.insert("x-request-id", value);
     }
 
     Ok((StatusCode::OK, response_headers, Json(normalized)))
@@ -202,4 +222,71 @@ async fn verify_captcha(
             "INVALID_CAPTCHA_MODE",
         )),
     }
+}
+
+fn parse_form_request(headers: &HeaderMap, content_type: &str, body: &Bytes) -> ApiResult<FormSubmitRequest> {
+    if content_type.contains("application/json") || content_type.is_empty() {
+        return serde_json::from_slice::<FormSubmitRequest>(body)
+            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "INVALID_JSON"));
+    }
+    if content_type.contains("application/x-www-form-urlencoded") {
+        let parsed = serde_urlencoded::from_bytes::<HashMap<String, String>>(body)
+            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "INVALID_FORM_URLENCODED"))?;
+        let form_name = parsed.get("formName").cloned().unwrap_or_default();
+        let honeypot = parsed.get("honeypot").cloned();
+        let captcha_token = parsed.get("captchaToken").cloned();
+        let meta = parsed
+            .get("meta")
+            .and_then(|value| serde_json::from_str::<Value>(value).ok());
+        let payload = Value::Object(
+            parsed
+                .iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "formName" | "honeypot" | "captchaToken" | "meta" | "csrfToken"
+                    )
+                })
+                .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                .collect(),
+        );
+        return Ok(FormSubmitRequest {
+            form_name,
+            payload,
+            honeypot,
+            captcha_token,
+            meta,
+        });
+    }
+    let _ = headers;
+    Err(api_error(
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "UNSUPPORTED_FORM_CONTENT_TYPE",
+    ))
+}
+
+fn enforce_csrf_if_needed(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    body: &FormSubmitRequest,
+    content_type: &str,
+) -> ApiResult<()> {
+    if state.config.form_csrf_mode != "double-submit" {
+        return Ok(());
+    }
+    if !content_type.contains("application/x-www-form-urlencoded") {
+        return Ok(());
+    }
+    let cookie = cookie_value(headers, &state.config.form_csrf_cookie_name)
+        .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "CSRF_TOKEN_MISSING"))?;
+    let token = headers
+        .get(&state.config.form_csrf_header_name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string())
+        .or_else(|| body.meta.as_ref().and_then(|meta| meta.get("csrfToken")).and_then(Value::as_str).map(str::to_string));
+    let token = token.ok_or_else(|| api_error(StatusCode::FORBIDDEN, "CSRF_TOKEN_MISSING"))?;
+    if token != cookie {
+        return Err(api_error(StatusCode::FORBIDDEN, "CSRF_TOKEN_INVALID"));
+    }
+    Ok(())
 }

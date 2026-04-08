@@ -39,6 +39,8 @@ apps/ssma-rust/
 │   ├── e2e_health.rs        # Health endpoint
 │   ├── e2e_logs.rs          # Log relay forwarding
 │   ├── e2e_forms.rs         # Form ingress, honeypot, captcha hooks
+│   ├── e2e_webhooks.rs      # Webhook verify/idempotency/forwarding
+│   ├── e2e_oidc.rs          # OIDC start/callback bridge
 │   ├── e2e_optimistic_ops.rs # Rework, undo, pending
 │   ├── e2e_scenarios.rs     # Full integration scenarios
 │   ├── e2e_ws.rs            # WebSocket handler tests

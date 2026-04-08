@@ -18,10 +18,13 @@ description: Work on HTTP endpoints, WebSocket handlers, SSE streams, or admin A
 | `/query/:name` | POST | `public_query()` | Forward query to backend adapter (JSON response) |
 | `/query/:name/stream` | POST | `public_query_stream()` | Forward query with SSE streaming (NDJSON) |
 | `/forms/submit` | POST | `features::forms::submit_form()` | Validate/rate-limit/honeypot/captcha hook then forward to backend |
+| `/webhooks/:provider` | POST | `features::webhooks::webhook_ingest()` | Verify provider payload + idempotency + backend forwarding |
 | `/auth/register` | POST | `auth::register()` | Create account |
 | `/auth/login` | POST | `auth::login()` | Authenticate |
 | `/auth/logout` | POST | `auth::logout()` | Clear session |
 | `/auth/me` | GET | `auth::me()` | Current user profile |
+| `/auth/oidc/start` | GET | `auth::oidc_start()` | Begin OIDC auth code + PKCE flow |
+| `/auth/oidc/callback` | GET | `auth::oidc_callback()` | Complete OIDC callback and issue session cookie |
 
 ### Media
 
@@ -130,6 +133,7 @@ GET /optimistic/events?site=<site>&cursor=<n>&islands=a,b
 - `transport/sse.rs` — SSE stream construction
 - `transport/admin.rs` — Staff-only endpoints
 - `features/forms.rs` — Form handling ingress + anti-bot hooks
+- `features/webhooks.rs` — Webhook verification + idempotency + forwarding
 - `features/logs.rs` — Log relay forwarding
 - `transport/internal.rs` — Backend event ingestion, internal assets
 

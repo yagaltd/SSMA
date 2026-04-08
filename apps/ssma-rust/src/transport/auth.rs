@@ -13,6 +13,12 @@ use argon2::password_hash::PasswordVerifier;
 use argon2::Argon2;
 use argon2::PasswordHash;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use oauth2::basic::BasicClient;
+use oauth2::reqwest::async_http_client;
+use oauth2::{
+    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
+    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, TokenUrl,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
@@ -147,6 +153,12 @@ pub(crate) struct RegisterRequest {
 pub(crate) struct LoginRequest {
     email: String,
     password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OidcCallbackQuery {
+    code: String,
+    state: String,
 }
 
 fn hash_password(password: &str) -> Result<String, String> {
@@ -348,6 +360,162 @@ pub(crate) async fn me(
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "USER_NOT_FOUND"))?;
 
     Ok(Json(user_response(&user)))
+}
+
+pub(crate) async fn oidc_start(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<impl IntoResponse> {
+    if !state.config.oidc_enabled {
+        return Err(api_error(StatusCode::NOT_FOUND, "OIDC_DISABLED"));
+    }
+
+    let client = build_oidc_client(&state)?;
+    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+    let mut auth_request = client.authorize_url(CsrfToken::new_random).set_pkce_challenge(pkce_challenge);
+    for scope in state.config.oidc_scopes.split_whitespace() {
+        auth_request = auth_request.add_scope(Scope::new(scope.to_string()));
+    }
+    auth_request = auth_request.add_extra_param("nonce", Uuid::new_v4().to_string());
+    let (auth_url, csrf_token) = auth_request.url();
+
+    let expires_at = crate::runtime::now_secs() + state.config.oidc_state_ttl_secs;
+    state
+        .oidc_states
+        .lock()
+        .expect("oidc state lock")
+                .insert(
+            csrf_token.secret().to_string(),
+            crate::gateway::OidcStateRecord {
+                verifier: pkce_verifier.secret().to_string(),
+                expires_at_secs: expires_at,
+            },
+        );
+
+    Ok(axum::response::Redirect::temporary(auth_url.as_ref()))
+}
+
+pub(crate) async fn oidc_callback(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<OidcCallbackQuery>,
+) -> ApiResult<impl IntoResponse> {
+    if !state.config.oidc_enabled {
+        return Err(api_error(StatusCode::NOT_FOUND, "OIDC_DISABLED"));
+    }
+    let client = build_oidc_client(&state)?;
+    let oidc_state = state
+        .oidc_states
+        .lock()
+        .expect("oidc state lock")
+        .remove(&query.state)
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "OIDC_STATE_INVALID"))?;
+    if oidc_state.expires_at_secs <= crate::runtime::now_secs() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "OIDC_STATE_EXPIRED"));
+    }
+
+    let token_response = client
+        .exchange_code(AuthorizationCode::new(query.code))
+        .set_pkce_verifier(PkceCodeVerifier::new(oidc_state.verifier))
+        .request_async(async_http_client)
+        .await
+        .map_err(|_| api_error(StatusCode::BAD_GATEWAY, "OIDC_TOKEN_EXCHANGE_FAILED"))?;
+
+    let access_token = token_response.access_token().secret().to_string();
+    let profile = if !state.config.oidc_userinfo_url.is_empty() {
+        state
+            .log_client
+            .get(&state.config.oidc_userinfo_url)
+            .bearer_auth(&access_token)
+            .send()
+            .await
+            .map_err(|_| api_error(StatusCode::BAD_GATEWAY, "OIDC_USERINFO_FAILED"))?
+            .json::<Value>()
+            .await
+            .map_err(|_| api_error(StatusCode::BAD_GATEWAY, "OIDC_USERINFO_FAILED"))?
+    } else {
+        json!({})
+    };
+
+    let sub = profile
+        .get("sub")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let email = profile
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::to_lowercase)
+        .unwrap_or_else(|| format!("{}@oidc.local", sub));
+    let name = profile
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| email.clone());
+
+    let user = if let Some(existing) = state.user_store.find_by_email(&email) {
+        existing
+    } else {
+        let now = crate::runtime::now_millis();
+        let created = UserRecord {
+            id: format!("oidc:{}", sub),
+            email,
+            password_hash: hash_password(&Uuid::new_v4().to_string())
+                .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "HASH_FAILED"))?,
+            name,
+            role: "user".to_string(),
+            status: "active".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+        };
+        state
+            .user_store
+            .create(created)
+            .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "OIDC_USER_CREATE_FAILED"))?
+    };
+
+    let _ = state.user_store.update_login(&user.id);
+    let user = state.user_store.find_by_id(&user.id).unwrap_or(user);
+    let jwt = issue_jwt(&user, &state)
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "JWT_FAILED"))?;
+
+    let mut response_headers = HeaderMap::new();
+    if let Ok(val) = HeaderValue::from_str(&auth_cookie_value(&jwt, &state.config)) {
+        response_headers.insert(SET_COOKIE, val);
+    }
+    Ok((StatusCode::OK, response_headers, Json(user_response(&user))))
+}
+
+fn build_oidc_client(state: &AppState) -> ApiResult<BasicClient> {
+    let auth_url = AuthUrl::new(state.config.oidc_auth_url.clone())
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "OIDC_CONFIG_INVALID"))?;
+    let token_url = TokenUrl::new(state.config.oidc_token_url.clone())
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "OIDC_CONFIG_INVALID"))?;
+    let redirect_url = RedirectUrl::new(state.config.oidc_redirect_url.clone())
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "OIDC_CONFIG_INVALID"))?;
+    let mut client = BasicClient::new(
+        ClientId::new(state.config.oidc_client_id.clone()),
+        Some(ClientSecret::new(state.config.oidc_client_secret.clone())),
+        auth_url,
+        Some(token_url),
+    )
+    .set_redirect_uri(redirect_url);
+    if state.config.oidc_client_secret.is_empty() {
+        client = BasicClient::new(
+            ClientId::new(state.config.oidc_client_id.clone()),
+            None,
+            AuthUrl::new(state.config.oidc_auth_url.clone())
+                .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "OIDC_CONFIG_INVALID"))?,
+            Some(
+                TokenUrl::new(state.config.oidc_token_url.clone())
+                    .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "OIDC_CONFIG_INVALID"))?,
+            ),
+        )
+        .set_redirect_uri(
+            RedirectUrl::new(state.config.oidc_redirect_url.clone())
+                .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "OIDC_CONFIG_INVALID"))?,
+        );
+    }
+    Ok(client)
 }
 
 #[cfg(test)]
