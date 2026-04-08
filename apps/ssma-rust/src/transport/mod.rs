@@ -4,9 +4,9 @@ pub mod internal;
 pub mod sse;
 pub mod ws;
 
-use crate::backend::{BackendHttpClient, BackendUser};
 use crate::config::Config;
-use crate::runtime::{now_millis, now_secs, IntentRecord, IntentStore};
+use crate::domain::runtime::{now_millis, now_secs, IntentRecord, IntentStore};
+use crate::adapters::backend::{BackendHttpClient, BackendUser};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::header::SET_COOKIE;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -25,10 +25,6 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-// Re-exports for features/webrtc.rs helpers.
-pub use crate::features::audio::apply_audio_backend_event;
-pub use crate::features::rtc::emit_rtc_signal;
-
 // --- Types ---
 
 #[derive(Clone)]
@@ -40,12 +36,10 @@ pub struct AppState {
     pub(crate) user_store: Arc<auth::UserStore>,
     pub(crate) assets: Arc<Mutex<HashMap<String, AssetRecord>>>,
     pub(crate) rtc_sessions: Arc<Mutex<HashMap<String, RtcSessionRecord>>>,
-    pub(crate) audio_sessions: Arc<Mutex<HashMap<String, AudioSessionRecord>>>,
     pub(crate) channel_limits: Arc<Mutex<HashMap<String, RateBucket>>>,
     pub(crate) global_limits: Arc<Mutex<HashMap<String, RateBucket>>>,
     pub(crate) channel_registry: Arc<Mutex<HashMap<String, ConnectionChannels>>>,
     pub(crate) metrics: Arc<MetricsState>,
-    pub(crate) webrtc: crate::features::webrtc::WebRtcManager,
     pub(crate) log_client: reqwest::Client,
 }
 
@@ -80,58 +74,6 @@ pub(crate) struct RtcSessionRecord {
     pub(crate) owner_key: String,
     pub(crate) participants: Vec<String>,
     pub(crate) signals: Vec<RtcSignalRecord>,
-    pub(crate) next_seq: u64,
-    pub(crate) expires_at_secs: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AudioSessionCapabilities {
-    pub(crate) audio_in: bool,
-    pub(crate) audio_out: bool,
-    pub(crate) partial_transcript: bool,
-    pub(crate) interrupt: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AudioSessionMode {
-    Transcription,
-    SpeechToSpeech,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AudioSessionStatus {
-    Created,
-    Signaling,
-    Connected,
-    Streaming,
-    Paused,
-    Ended,
-    Error,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct AudioSessionEventRecord {
-    pub(crate) seq: u64,
-    pub(crate) event_type: String,
-    pub(crate) payload: Value,
-    pub(crate) created_at_ms: i64,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct AudioSessionRecord {
-    pub(crate) session_id: String,
-    pub(crate) rtc_session_id: String,
-    pub(crate) site: String,
-    pub(crate) owner_key: String,
-    pub(crate) participants: Vec<String>,
-    pub(crate) mode: AudioSessionMode,
-    pub(crate) status: AudioSessionStatus,
-    pub(crate) backend: String,
-    pub(crate) capabilities: AudioSessionCapabilities,
-    pub(crate) events: Vec<AudioSessionEventRecord>,
     pub(crate) next_seq: u64,
     pub(crate) expires_at_secs: u64,
 }
@@ -266,23 +208,6 @@ pub(crate) struct PostRtcSignalRequest {
     pub(crate) payload: Value,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CreateAudioSessionRequest {
-    pub(crate) participants: Option<Vec<String>>,
-    pub(crate) mode: Option<AudioSessionMode>,
-    pub(crate) backend: Option<String>,
-    pub(crate) capabilities: Option<AudioSessionCapabilities>,
-    pub(crate) ttl_secs: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AudioSessionCommandRequest {
-    pub(crate) command: String,
-    pub(crate) payload: Option<Value>,
-}
-
 pub(crate) type ApiError = (StatusCode, Json<Value>);
 pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
@@ -310,12 +235,10 @@ pub fn build_state(config: Config) -> Arc<AppState> {
         user_store,
         assets: Arc::new(Mutex::new(HashMap::new())),
         rtc_sessions: Arc::new(Mutex::new(HashMap::new())),
-        audio_sessions: Arc::new(Mutex::new(HashMap::new())),
         channel_limits: Arc::new(Mutex::new(HashMap::new())),
         global_limits: Arc::new(Mutex::new(HashMap::new())),
         channel_registry: Arc::new(Mutex::new(HashMap::new())),
         metrics: Arc::new(MetricsState::default()),
-        webrtc: crate::features::webrtc::WebRtcManager::new(),
         log_client: reqwest::Client::new(),
     })
 }
@@ -323,6 +246,7 @@ pub fn build_state(config: Config) -> Arc<AppState> {
 pub fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/query/:name", post(public_query))
         .route("/query/:name/stream", post(public_query_stream))
         .route("/auth/register", post(auth::register))
@@ -338,16 +262,6 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route(
             "/media/assets/:asset_id/content",
             get(crate::features::media::get_asset_content),
-        )
-        .route("/audio/sessions", post(crate::features::audio::create_audio_session))
-        .route(
-            "/audio/sessions/:session_id",
-            get(crate::features::audio::get_audio_session)
-                .delete(crate::features::audio::delete_audio_session),
-        )
-        .route(
-            "/audio/sessions/:session_id/commands",
-            post(crate::features::audio::post_audio_session_command),
         )
         .route("/rtc/sessions", post(crate::features::rtc::create_rtc_session))
         .route(
@@ -458,6 +372,43 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
     }))
 }
 
+async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Check backend connectivity if configured
+    let backend_status = if state.backend.is_configured() {
+        match state.backend.health(&crate::adapters::backend::BackendContext {
+            site: "internal".to_string(),
+            actor_key: None,
+            connection_id: None,
+            ip: None,
+            user_agent: None,
+            user: None,
+        }).await {
+            Ok(health) => {
+                let status = health.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+                if status == "ok" { "healthy" } else { "degraded" }
+            }
+            Err(_) => "unreachable",
+        }
+    } else {
+        "unconfigured"
+    };
+
+    let is_ready = backend_status != "unreachable";
+    let status_code = if is_ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (status_code, Json(json!({
+        "status": if is_ready { "ok" } else { "not_ready" },
+        "service": "ssma-rust",
+        "subprotocol": state.config.subprotocol,
+        "cursor": state.store.latest_cursor(),
+        "backend": backend_status,
+    })))
+}
+
 async fn metrics(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({
         "status": "ok",
@@ -509,7 +460,7 @@ async fn public_query(
     let actor = resolve_actor_from_headers(&headers, &state.config, true)
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
     let site = request_site(&headers);
-    let backend_ctx = crate::backend::BackendContext {
+    let backend_ctx = crate::adapters::backend::BackendContext {
         site,
         actor_key: Some(actor.actor_key.clone()),
         connection_id: None,
@@ -558,7 +509,7 @@ async fn public_query_stream(
     let actor = resolve_actor_from_headers(&headers, &state.config, true)
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
     let site = request_site(&headers);
-    let backend_ctx = crate::backend::BackendContext {
+    let backend_ctx = crate::adapters::backend::BackendContext {
         site,
         actor_key: Some(actor.actor_key.clone()),
         connection_id: None,
@@ -749,23 +700,6 @@ pub(crate) fn purge_expired_runtime_state(state: &Arc<AppState>) {
         let mut sessions = state.rtc_sessions.lock().expect("rtc sessions lock");
         sessions.retain(|_, session| session.expires_at_secs > now);
     }
-    {
-        let mut sessions = state.audio_sessions.lock().expect("audio sessions lock");
-        let mut expired_rtc_sessions = Vec::new();
-        sessions.retain(|_, session| {
-            let keep = session.expires_at_secs > now;
-            if !keep {
-                expired_rtc_sessions.push(session.rtc_session_id.clone());
-            }
-            keep
-        });
-        if !expired_rtc_sessions.is_empty() {
-            let mut rtc_sessions = state.rtc_sessions.lock().expect("rtc sessions lock");
-            for rtc_id in expired_rtc_sessions {
-                rtc_sessions.remove(&rtc_id);
-            }
-        }
-    }
 }
 
 pub(crate) fn consume_global_rate_limit(state: &Arc<AppState>, key: String, max: u32, window_ms: i64) -> bool {
@@ -815,21 +749,6 @@ pub(crate) fn role_rank(role: &str) -> u8 {
 }
 
 pub(crate) fn can_access_channel(state: &Arc<AppState>, channel: &str, context: &ConnectionContext) -> bool {
-    if let Some(session_id) = channel.strip_prefix("audio.session.") {
-        let Some(actor_key) = &context.actor_key else {
-            return false;
-        };
-        let sessions = state.audio_sessions.lock().expect("audio sessions lock");
-        let Some(session) = sessions.get(session_id) else {
-            return false;
-        };
-        return session.site == context.site
-            && (session.owner_key == *actor_key
-                || session
-                    .participants
-                    .iter()
-                    .any(|participant| participant == actor_key));
-    }
     if let Some(session_id) = channel.strip_prefix("rtc.session.") {
         let Some(actor_key) = &context.actor_key else {
             return false;

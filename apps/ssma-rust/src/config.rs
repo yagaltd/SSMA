@@ -193,6 +193,72 @@ impl Config {
             backend_timeout_ms,
         }
     }
+
+    /// Validate configuration for production readiness.
+    /// Returns Ok(()) if valid, or Err with description of the first failure.
+    pub fn validate(&self) -> Result<(), String> {
+        // Validate required secrets in production
+        if self.auth_jwt_secret == "change-me-in-production" {
+            return Err("SSMA_AUTH_JWT_SECRET must be set in production".to_string());
+        }
+
+        // Validate path writability
+        if let Some(parent) = self.intent_store_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create intent store directory: {}", e))?;
+        }
+        // Try to create/open the intent store file
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.intent_store_path)
+            .map_err(|e| format!("Cannot write to intent store path: {}", e))?;
+
+        if let Some(parent) = self.user_store_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create user store directory: {}", e))?;
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.user_store_path)
+            .map_err(|e| format!("Cannot write to user store path: {}", e))?;
+
+        if let Some(parent) = self.media_storage_root.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create media storage directory: {}", e))?;
+        }
+        std::fs::create_dir_all(&self.media_storage_root)
+            .map_err(|e| format!("Cannot create media storage directory: {}", e))?;
+
+        // Validate allowed origins format
+        if !self.allowed_origins.is_empty() && self.allowed_origins != "*" {
+            let origins: Vec<&str> = self.allowed_origins.split(',').collect();
+            for origin in origins {
+                let origin = origin.trim();
+                if !origin.is_empty() {
+                    // Basic URL validation
+                    if !origin.starts_with("http://") && !origin.starts_with("https://") {
+                        return Err(format!(
+                            "Invalid origin '{}': must start with http:// or https://",
+                            origin
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Validate cookie configuration consistency
+        if self.auth_cookie_secure && !self.allowed_origins.is_empty() && self.allowed_origins != "*" {
+            // If secure cookies are enabled, ensure HTTPS is being used
+            // This is a warning-level check, not a hard error
+            tracing::warn!(
+                "auth_cookie_secure=true with explicit origins - ensure reverse proxy handles HTTPS"
+            );
+        }
+
+        Ok(())
+    }
 }
 
 fn default_island_access() -> HashMap<String, String> {
