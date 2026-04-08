@@ -2,6 +2,10 @@ use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::pin::Pin;
+use std::time::Duration;
+
+/// Default backend timeout: 5 seconds
+const DEFAULT_BACKEND_TIMEOUT_MS: u64 = 5000;
 
 /// A streaming response from the backend (NDJSON)
 pub type BackendStream = Pin<Box<dyn Stream<Item = Result<Value, String>> + Send>>;
@@ -27,18 +31,31 @@ pub struct BackendContext {
 pub struct BackendHttpClient {
     pub base_url: String,
     client: reqwest::Client,
+    timeout_ms: u64,
 }
 
 impl BackendHttpClient {
     pub fn new(base_url: impl Into<String>) -> Self {
+        Self::with_timeout(base_url, DEFAULT_BACKEND_TIMEOUT_MS)
+    }
+
+    pub fn with_timeout(base_url: impl Into<String>, timeout_ms: u64) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_millis(timeout_ms))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+            timeout_ms,
         }
     }
 
     pub fn is_configured(&self) -> bool {
         !self.base_url.is_empty()
+    }
+
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
     }
 
     pub async fn apply_intents(
@@ -107,45 +124,6 @@ impl BackendHttpClient {
         } else {
             format!("ws://{}{}", self.base_url.trim_end_matches('/'), path)
         }
-    }
-
-    pub async fn create_audio_session(&self, payload: Value) -> Result<Value, reqwest::Error> {
-        self.post_json("/internal/audio/sessions", payload).await
-    }
-
-    pub async fn get_audio_session(&self, session_id: &str) -> Result<Value, reqwest::Error> {
-        let url = format!(
-            "{}/internal/audio/sessions/{}",
-            self.base_url,
-            urlencoding::encode(session_id)
-        );
-        let response = self.client.get(url).send().await?;
-        response.json::<Value>().await
-    }
-
-    pub async fn delete_audio_session(&self, session_id: &str) -> Result<Value, reqwest::Error> {
-        let url = format!(
-            "{}/internal/audio/sessions/{}",
-            self.base_url,
-            urlencoding::encode(session_id)
-        );
-        let response = self.client.delete(url).send().await?;
-        response.json::<Value>().await
-    }
-
-    pub async fn command_audio_session(
-        &self,
-        session_id: &str,
-        payload: Value,
-    ) -> Result<Value, reqwest::Error> {
-        self.post_json(
-            &format!(
-                "/internal/audio/sessions/{}/commands",
-                urlencoding::encode(session_id)
-            ),
-            payload,
-        )
-        .await
     }
 
     async fn post_json(&self, path: &str, payload: Value) -> Result<Value, reqwest::Error> {

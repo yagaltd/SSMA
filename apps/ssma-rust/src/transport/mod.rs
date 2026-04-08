@@ -13,7 +13,10 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::timeout::TimeoutLayer;
+use std::time::Duration;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -224,7 +227,7 @@ pub fn build_state(config: Config) -> Arc<AppState> {
         }
     }
     let store = IntentStore::new(config.intent_store_path.clone(), config.replay_window_ms, config.optimistic_max_entries);
-    let backend = BackendHttpClient::new(config.backend_url.clone());
+    let backend = BackendHttpClient::with_timeout(config.backend_url.clone(), config.backend_timeout_ms);
     let (events, _) = broadcast::channel(1024);
     let user_store = Arc::new(auth::UserStore::new(config.user_store_path.clone()));
     Arc::new(AppState {
@@ -244,7 +247,13 @@ pub fn build_state(config: Config) -> Arc<AppState> {
 }
 
 pub fn app(state: Arc<AppState>) -> Router {
-    Router::new()
+    // Short timeout for standard HTTP requests (5 seconds)
+    let short_timeout = Duration::from_millis(state.config.backend_timeout_ms);
+    // Longer timeout for long-lived operations like initial subscription (30 seconds)
+    let long_timeout = Duration::from_secs(30);
+
+    // Routes with short timeout
+    let short_timeout_routes = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/query/:name", post(public_query))
@@ -271,8 +280,6 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/logs/batch", post(crate::features::logs::logs_batch))
         .route("/logs/health", get(crate::features::logs::logs_health))
         .route("/optimistic/metrics", get(metrics))
-        .route("/optimistic/ws", get(ws::ws_upgrade))
-        .route("/optimistic/events", get(sse::sse_events))
         .route(
             "/optimistic/rework",
             post(crate::features::optimistic::optimistic_rework),
@@ -297,11 +304,28 @@ pub fn app(state: Arc<AppState>) -> Router {
             "/internal/assets/:asset_id/content",
             get(internal::get_internal_asset_content),
         )
-        .layer(DefaultBodyLimit::max(
-            state.config.media_max_upload_bytes as usize,
-        ))
-        .layer(cors_layer(&state.config.allowed_origins))
-        .with_state(state)
+        .layer(
+            ServiceBuilder::new()
+                .layer(TimeoutLayer::new(short_timeout))
+                .layer(DefaultBodyLimit::max(
+                    state.config.media_max_upload_bytes as usize,
+                ))
+                .layer(cors_layer(&state.config.allowed_origins)),
+        )
+        .with_state(state.clone());
+
+    // Routes with long timeout for WebSocket and SSE upgrade
+    let long_timeout_routes = Router::new()
+        .route("/optimistic/ws", get(ws::ws_upgrade))
+        .route("/optimistic/events", get(sse::sse_events))
+        .layer(
+            ServiceBuilder::new()
+                .layer(TimeoutLayer::new(long_timeout)),
+        )
+        .with_state(state);
+
+    // Combine all routes
+    short_timeout_routes.merge(long_timeout_routes)
 }
 
 fn cors_layer(allowed_origins: &str) -> CorsLayer {
