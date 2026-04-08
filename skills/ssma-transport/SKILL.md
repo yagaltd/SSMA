@@ -15,7 +15,8 @@ description: Work on HTTP endpoints, WebSocket handlers, SSE streams, or admin A
 | `/optimistic/metrics` | GET | `metrics()` | Operational counters |
 | `/optimistic/ws` | GET | `ws::ws_upgrade()` | WebSocket upgrade |
 | `/optimistic/events` | GET | `sse::sse_events()` | SSE stream |
-| `/query/:name` | POST | `public_query()` | Forward query to backend adapter |
+| `/query/:name` | POST | `public_query()` | Forward query to backend adapter (JSON response) |
+| `/query/:name/stream` | POST | `public_query_stream()` | Forward query with SSE streaming (NDJSON) |
 | `/auth/register` | POST | `auth::register()` | Create account |
 | `/auth/login` | POST | `auth::login()` | Authenticate |
 | `/auth/logout` | POST | `auth::logout()` | Clear session |

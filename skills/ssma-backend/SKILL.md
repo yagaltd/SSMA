@@ -62,7 +62,7 @@ Base URL: `SSMA_BACKEND_URL`
 
 Status values: `acked`, `rejected`, `conflict`, `failed`
 
-## `POST /query/:name`
+## `POST /query/:name` (JSON response)
 
 ### Request
 
@@ -85,6 +85,34 @@ Status values: `acked`, `rejected`, `conflict`, `failed`
   "data": { "product": { "name": "Widget", "price": 9.99 } }
 }
 ```
+
+## `POST /query/:name` (streaming, NDJSON)
+
+When SSMA calls with `Accept: application/x-ndjson` header and `stream: true` in body:
+
+### Request
+
+```json
+{
+  "payload": { "prompt": "Hello" },
+  "context": { ... },
+  "stream": true
+}
+```
+
+### Response (NDJSON)
+
+Each line is a JSON object, flushed as available:
+
+```json
+{"type":"chunk","delta":"Hello"}
+{"type":"chunk","delta":" world"}
+{"type":"done"}
+```
+
+SSMA forwards these as SSE events to the client at `/query/:name/stream`.
+
+---
 
 ## `POST /subscribe`
 

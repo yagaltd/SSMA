@@ -1,5 +1,11 @@
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::pin::Pin;
+use tokio::sync::mpsc;
+
+/// A streaming response from the backend (NDJSON)
+pub type BackendStream = Pin<Box<dyn futures_util::Stream<Item = Result<Value, reqwest::Error>> + Send>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendUser {
@@ -147,5 +153,57 @@ impl BackendHttpClient {
         let url = format!("{}{}", self.base_url, path);
         let response = self.client.post(url).json(&payload).send().await?;
         response.json::<Value>().await
+    }
+
+    /// Stream NDJSON from backend (for AI streaming, real-time queries)
+    pub async fn query_stream(
+        &self,
+        name: &str,
+        payload: Value,
+        context: &BackendContext,
+    ) -> Result<BackendStream, reqwest::Error> {
+        if !self.is_configured() {
+            let stream = futures_util::stream::empty();
+            return Ok(Box::pin(stream));
+        }
+        let url = format!(
+            "{}/query/{}",
+            self.base_url,
+            urlencoding::encode(name)
+        );
+        let response = self
+            .client
+            .post(&url)
+            .header("Accept", "application/x-ndjson")
+            .json(&serde_json::json!({ "payload": payload, "context": context, "stream": true }))
+            .send()
+            .await?;
+
+        let stream = response
+            .bytes_stream()
+            .map(|chunk| {
+                chunk.map(|bytes| {
+                    let text = String::from_utf8_lossy(&bytes);
+                    // Parse NDJSON: each line is a JSON object
+                    for line in text.lines() {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            if let Ok(json) = serde_json::from_str::<Value>(trimmed) {
+                                return json;
+                            }
+                        }
+                    }
+                    Value::Null
+                })
+            })
+            .filter_map(|result| async move {
+                match result {
+                    Ok(val) if !val.is_null() => Some(Ok(val)),
+                    Ok(_) => None,
+                    Err(e) => Some(Err(e)),
+                }
+            });
+
+        Ok(Box::pin(stream))
     }
 }

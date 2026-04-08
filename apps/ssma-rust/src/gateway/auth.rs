@@ -223,6 +223,14 @@ fn user_to_json(user: &UserRecord) -> Value {
     })
 }
 
+/// Wrap user in envelope expected by CSMA frontend: { status, user }
+fn user_response(user: &UserRecord) -> Value {
+    json!({
+        "status": "ok",
+        "user": user_to_json(user),
+    })
+}
+
 // --- Handlers ---
 
 pub(crate) async fn register(
@@ -272,7 +280,7 @@ pub(crate) async fn register(
         response_headers.insert(SET_COOKIE, val);
     }
 
-    Ok((StatusCode::CREATED, response_headers, Json(user_to_json(&saved))))
+    Ok((StatusCode::CREATED, response_headers, Json(user_response(&saved))))
 }
 
 pub(crate) async fn login(
@@ -301,7 +309,7 @@ pub(crate) async fn login(
     // Re-fetch to get updated last_login_at
     let updated = state.user_store.find_by_id(&user.id).unwrap_or(user);
 
-    Ok((StatusCode::OK, response_headers, Json(user_to_json(&updated))))
+    Ok((StatusCode::OK, response_headers, Json(user_response(&updated))))
 }
 
 pub(crate) async fn logout(
@@ -337,7 +345,7 @@ pub(crate) async fn me(
         .find_by_id(&claims.sub)
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "USER_NOT_FOUND"))?;
 
-    Ok(Json(user_to_json(&user)))
+    Ok(Json(user_response(&user)))
 }
 
 #[cfg(test)]

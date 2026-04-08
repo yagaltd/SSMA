@@ -16,6 +16,28 @@ Session cookie based auth using `ssma_session` (configurable via `SSMA_AUTH_COOK
 3. **Logout** → `POST /auth/logout` → clear cookie
 4. **Me** → `GET /auth/me` → decode JWT → return user profile
 
+### Response Shape
+
+All auth endpoints return `{ status: "ok", user: {...} }`:
+
+```json
+{
+  "status": "ok",
+  "user": {
+    "id": "uuid",
+    "email": "user@example.com",
+    "name": "User",
+    "role": "user",
+    "status": "active",
+    "createdAt": 1234567890,
+    "updatedAt": 1234567890,
+    "lastLoginAt": null
+  }
+}
+```
+
+This envelope matches CSMA's `AuthService` expectation of `response.user`.
+
 ### JWT Structure
 
 - Algorithm: HS256

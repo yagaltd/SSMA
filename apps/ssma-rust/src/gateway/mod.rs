@@ -329,6 +329,7 @@ pub fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/query/:name", post(public_query))
+        .route("/query/:name/stream", post(public_query_stream))
         .route("/auth/register", post(auth::register))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
@@ -530,6 +531,63 @@ async fn public_query(
     }
 
     Ok((StatusCode::OK, response_headers, Json(normalized)))
+}
+
+async fn public_query_stream(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Json(body): Json<PublicQueryRequest>,
+) -> ApiResult<impl IntoResponse> {
+    use futures_util::StreamExt;
+    use std::convert::Infallible;
+
+    purge_expired_runtime_state(&state);
+    let actor = resolve_actor_from_headers(&headers, &state.config, true)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    let site = request_site(&headers);
+    let backend_ctx = crate::backend::BackendContext {
+        site,
+        actor_key: Some(actor.actor_key.clone()),
+        connection_id: None,
+        ip: Some(connection_ip_from_headers(&headers)),
+        user_agent: headers
+            .get("user-agent")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_string()),
+        user: Some(BackendUser {
+            id: actor.user_id.clone(),
+            role: actor.role.clone(),
+        }),
+    };
+
+    let stream = state
+        .backend
+        .query_stream(&name, body.payload, &backend_ctx)
+        .await
+        .map_err(|_| api_error(StatusCode::BAD_GATEWAY, "BACKEND_STREAM_FAILED"))?;
+
+    let sse_stream = stream.map(|result| -> Result<axum::response::sse::Event, Infallible> {
+        match result {
+            Ok(data) => Ok(axum::response::sse::Event::default()
+                .json_data(&data)
+                .unwrap_or_else(|_| axum::response::sse::Event::default().data("{}"))),
+            Err(_) => Ok(axum::response::sse::Event::default()
+                .event("error")
+                .data("{\"error\":\"STREAM_ERROR\"}")),
+        }
+    });
+
+    let sse = axum::response::Sse::new(sse_stream);
+
+    let mut response_headers = HeaderMap::new();
+    if let Some(cookie) = actor.set_cookie {
+        if let Ok(value) = HeaderValue::from_str(&cookie) {
+            response_headers.insert(SET_COOKIE, value);
+        }
+    }
+
+    Ok((StatusCode::OK, response_headers, sse))
 }
 
 // --- Shared utility functions (pub(crate)) ---

@@ -71,12 +71,12 @@ async fn register_returns_201_with_cookie_and_user() {
 
     let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
     let user: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(user["email"], "alice@example.com");
-    assert_eq!(user["name"], "Alice");
-    assert_eq!(user["role"], "user");
-    assert_eq!(user["status"], "active");
-    assert!(user.get("passwordHash").is_none());
-    assert!(user.get("password_hash").is_none());
+    assert_eq!(user["user"]["email"], "alice@example.com");
+    assert_eq!(user["user"]["name"], "Alice");
+    assert_eq!(user["user"]["role"], "user");
+    assert_eq!(user["user"]["status"], "active");
+    assert!(user["user"].get("passwordHash").is_none());
+    assert!(user["user"].get("password_hash").is_none());
 }
 
 #[tokio::test]
@@ -162,7 +162,7 @@ async fn login_correct_password_returns_200_with_cookie() {
 
     let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
     let user: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(user["email"], "charlie@example.com");
+    assert_eq!(user["user"]["email"], "charlie@example.com");
 }
 
 #[tokio::test]
@@ -238,8 +238,8 @@ async fn me_with_valid_cookie_returns_user() {
 
     let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
     let user: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(user["email"], "eve@example.com");
-    assert_eq!(user["name"], "Eve");
+    assert_eq!(user["user"]["email"], "eve@example.com");
+    assert_eq!(user["user"]["name"], "Eve");
 }
 
 #[tokio::test]
@@ -315,5 +315,5 @@ async fn registered_user_jwt_works_for_protected_channel() {
 
     let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
     let user: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(user["role"], "user");
+    assert_eq!(user["user"]["role"], "user");
 }
