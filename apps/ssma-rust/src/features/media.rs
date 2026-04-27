@@ -1,7 +1,7 @@
 use crate::transport::{
     api_error, asset_metadata, emit_server_event, multipart_error, owned_asset,
     purge_expired_runtime_state, request_site, resolve_actor_from_headers,
-    ApiResult, AppState, AssetRecord,
+    ApiResult, AppState, AssetRecord, UploadGrantRecord,
 };
 use crate::runtime::now_secs;
 use axum::extract::{Multipart, Path, State};
@@ -9,10 +9,21 @@ use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateUploadGrantRequest {
+    captcha_token: Option<String>,
+    file_name: Option<String>,
+    file_size: Option<u64>,
+    file_type: Option<String>,
+    meta: Option<Value>,
+}
 
 pub(crate) fn media_type_from_mime(mime: &str) -> Option<&'static str> {
     if mime.starts_with("image/") {
@@ -33,6 +44,10 @@ pub(crate) async fn upload_media(
     let actor = resolve_actor_from_headers(&headers, &state.config, true)
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
     let site = request_site(&headers);
+    let upload_grant_id = headers
+        .get("x-ssma-upload-grant")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
 
     let mut selected: Option<(String, Option<String>, Vec<u8>)> = None;
     while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
@@ -61,6 +76,15 @@ pub(crate) async fn upload_media(
             "PAYLOAD_TOO_LARGE",
         ));
     }
+    enforce_upload_grant(
+        &state,
+        upload_grant_id.as_deref(),
+        &site,
+        &actor.actor_key,
+        file_name.as_deref(),
+        bytes.len() as u64,
+        &mime_type,
+    )?;
 
     let asset_id = Uuid::new_v4().to_string();
     let path = state
@@ -108,6 +132,152 @@ pub(crate) async fn upload_media(
         response_headers,
         Json(json!({ "status": "ok", "asset": metadata })),
     ))
+}
+
+pub(crate) async fn create_upload_grant(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CreateUploadGrantRequest>,
+) -> ApiResult<impl IntoResponse> {
+    purge_expired_runtime_state(&state);
+    if state.config.media_upload_grant_mode == "disabled" {
+        return Err(api_error(StatusCode::NOT_FOUND, "UPLOAD_GRANTS_DISABLED"));
+    }
+
+    let actor = resolve_actor_from_headers(&headers, &state.config, true)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    let site = request_site(&headers);
+    let ip = crate::transport::connection_ip_from_headers(&headers);
+    let ua = headers
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+
+    let verified = crate::features::forms::verify_captcha(
+        &state,
+        body.captcha_token.as_deref(),
+        "media-upload",
+        &site,
+        &ip,
+        ua.as_deref(),
+        &actor.actor_key,
+    )
+    .await?;
+    if !verified {
+        emit_server_event(
+            &state,
+            "MEDIA_UPLOAD_GRANT_REJECTED",
+            json!({"site": site, "actorKey": actor.actor_key}),
+        );
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "CAPTCHA_VERIFICATION_FAILED",
+        ));
+    }
+
+    if let Some(size) = body.file_size {
+        if size > state.config.media_max_upload_bytes {
+            return Err(api_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "PAYLOAD_TOO_LARGE",
+            ));
+        }
+    }
+
+    let now = now_secs();
+    let grant = UploadGrantRecord {
+        grant_id: Uuid::new_v4().to_string(),
+        site: site.clone(),
+        owner_key: actor.actor_key.clone(),
+        file_name: body.file_name.clone(),
+        file_size: body.file_size,
+        file_type: body.file_type.clone(),
+        created_at_secs: now,
+        expires_at_secs: now + state.config.media_upload_grant_ttl_secs,
+        used: false,
+    };
+    let grant_id = grant.grant_id.clone();
+    let created_at = grant.created_at_secs;
+    let expires_at = grant.expires_at_secs;
+    state
+        .upload_grants
+        .lock()
+        .expect("upload grants lock")
+        .insert(grant_id.clone(), grant);
+
+    emit_server_event(
+        &state,
+        "MEDIA_UPLOAD_GRANT_CREATED",
+        json!({"site": site, "actorKey": actor.actor_key}),
+    );
+
+    let mut response_headers = HeaderMap::new();
+    if let Some(cookie) = actor.set_cookie {
+        if let Ok(value) = HeaderValue::from_str(&cookie) {
+            response_headers.insert(SET_COOKIE, value);
+        }
+    }
+
+    let _ = body.meta;
+    Ok((
+        StatusCode::CREATED,
+        response_headers,
+        Json(json!({
+            "status": "ok",
+            "grant": {
+                "grantId": grant_id,
+                "createdAt": created_at,
+                "expiresAt": expires_at,
+            },
+        })),
+    ))
+}
+
+fn enforce_upload_grant(
+    state: &Arc<AppState>,
+    grant_id: Option<&str>,
+    site: &str,
+    actor_key: &str,
+    file_name: Option<&str>,
+    file_size: u64,
+    file_type: &str,
+) -> ApiResult<()> {
+    if state.config.media_upload_grant_mode != "required" {
+        return Ok(());
+    }
+
+    let Some(grant_id) = grant_id.filter(|value| !value.trim().is_empty()) else {
+        return Err(api_error(StatusCode::FORBIDDEN, "UPLOAD_GRANT_REQUIRED"));
+    };
+
+    let now = now_secs();
+    let mut grants = state.upload_grants.lock().expect("upload grants lock");
+    grants.retain(|_, grant| grant.expires_at_secs > now && !grant.used);
+    let Some(grant) = grants.get_mut(grant_id) else {
+        return Err(api_error(StatusCode::FORBIDDEN, "UPLOAD_GRANT_INVALID"));
+    };
+
+    if grant.site != site || grant.owner_key != actor_key || grant.expires_at_secs <= now || grant.used {
+        return Err(api_error(StatusCode::FORBIDDEN, "UPLOAD_GRANT_INVALID"));
+    }
+    if let Some(expected_size) = grant.file_size {
+        if expected_size != file_size {
+            return Err(api_error(StatusCode::FORBIDDEN, "UPLOAD_GRANT_MISMATCH"));
+        }
+    }
+    if let Some(expected_type) = grant.file_type.as_deref() {
+        if expected_type != file_type {
+            return Err(api_error(StatusCode::FORBIDDEN, "UPLOAD_GRANT_MISMATCH"));
+        }
+    }
+    if let Some(expected_name) = grant.file_name.as_deref() {
+        if Some(expected_name) != file_name {
+            return Err(api_error(StatusCode::FORBIDDEN, "UPLOAD_GRANT_MISMATCH"));
+        }
+    }
+
+    grant.used = true;
+    Ok(())
 }
 
 pub(crate) async fn get_asset_metadata(

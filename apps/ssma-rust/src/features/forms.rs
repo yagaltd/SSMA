@@ -181,7 +181,7 @@ pub(crate) async fn submit_form(
     Ok((StatusCode::OK, response_headers, Json(normalized)))
 }
 
-async fn verify_captcha(
+pub(crate) async fn verify_captcha(
     state: &Arc<AppState>,
     token: Option<&str>,
     form_name: &str,
@@ -196,41 +196,101 @@ async fn verify_captcha(
             let Some(token) = token else {
                 return Err(api_error(StatusCode::BAD_REQUEST, "CAPTCHA_REQUIRED"));
             };
-
-            let response = state
-                .log_client
-                .post(&state.config.form_captcha_verify_url)
-                .timeout(std::time::Duration::from_millis(
-                    state.config.form_captcha_timeout_ms,
-                ))
-                .json(&json!({
-                    "token": token,
-                    "formName": form_name,
-                    "site": site,
-                    "ip": ip,
-                    "userAgent": user_agent,
-                    "actorKey": actor_key,
-                }))
-                .send()
-                .await
-                .map_err(|_| api_error(StatusCode::FORBIDDEN, "CAPTCHA_VERIFICATION_FAILED"))?;
-
-            if !response.status().is_success() {
-                return Ok(false);
+            match state.config.form_captcha_adapter.as_str() {
+                "external-json" => {
+                    verify_external_json_captcha(
+                        state, token, form_name, site, ip, user_agent, actor_key,
+                    )
+                    .await
+                }
+                "cap-siteverify" => verify_cap_siteverify_captcha(state, token).await,
+                _ => Err(api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INVALID_CAPTCHA_ADAPTER",
+                )),
             }
-
-            let body = response
-                .json::<Value>()
-                .await
-                .map_err(|_| api_error(StatusCode::FORBIDDEN, "CAPTCHA_VERIFICATION_FAILED"))?;
-
-            Ok(body.get("ok").and_then(Value::as_bool).unwrap_or(false))
         }
         _ => Err(api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INVALID_CAPTCHA_MODE",
         )),
     }
+}
+
+async fn verify_external_json_captcha(
+    state: &Arc<AppState>,
+    token: &str,
+    form_name: &str,
+    site: &str,
+    ip: &str,
+    user_agent: Option<&str>,
+    actor_key: &str,
+) -> ApiResult<bool> {
+    let response = state
+        .log_client
+        .post(&state.config.form_captcha_verify_url)
+        .timeout(std::time::Duration::from_millis(
+            state.config.form_captcha_timeout_ms,
+        ))
+        .json(&json!({
+            "token": token,
+            "formName": form_name,
+            "site": site,
+            "ip": ip,
+            "userAgent": user_agent,
+            "actorKey": actor_key,
+        }))
+        .send()
+        .await
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "CAPTCHA_VERIFICATION_FAILED"))?;
+
+    if !response.status().is_success() {
+        return Ok(false);
+    }
+
+    let body = response
+        .json::<Value>()
+        .await
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "CAPTCHA_VERIFICATION_FAILED"))?;
+
+    Ok(body.get("ok").and_then(Value::as_bool).unwrap_or(false))
+}
+
+async fn verify_cap_siteverify_captcha(state: &Arc<AppState>, token: &str) -> ApiResult<bool> {
+    if state.config.form_captcha_secret.is_empty() {
+        return Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "CAPTCHA_SECRET_MISSING",
+        ));
+    }
+
+    let response = state
+        .log_client
+        .post(&state.config.form_captcha_verify_url)
+        .timeout(std::time::Duration::from_millis(
+            state.config.form_captcha_timeout_ms,
+        ))
+        .json(&json!({
+            "secret": state.config.form_captcha_secret,
+            "response": token,
+        }))
+        .send()
+        .await
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "CAPTCHA_VERIFICATION_FAILED"))?;
+
+    if !response.status().is_success() {
+        return Ok(false);
+    }
+
+    let body = response
+        .json::<Value>()
+        .await
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "CAPTCHA_VERIFICATION_FAILED"))?;
+
+    Ok(body
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false))
 }
 
 async fn parse_form_request(

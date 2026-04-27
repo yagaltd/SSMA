@@ -18,6 +18,8 @@ pub struct Config {
     pub media_storage_root: PathBuf,
     pub media_max_upload_bytes: u64,
     pub media_ttl_secs: u64,
+    pub media_upload_grant_mode: String,
+    pub media_upload_grant_ttl_secs: u64,
     pub global_rate_window_ms: i64,
     pub global_rate_max: u32,
     pub channel_subscribe_window_ms: i64,
@@ -50,7 +52,9 @@ pub struct Config {
     pub form_rate_window_ms: i64,
     pub form_rate_max: u32,
     pub form_captcha_mode: String,
+    pub form_captcha_adapter: String,
     pub form_captcha_verify_url: String,
+    pub form_captcha_secret: String,
     pub form_captcha_timeout_ms: u64,
     pub form_csrf_mode: String,
     pub form_csrf_cookie_name: String,
@@ -117,6 +121,12 @@ impl Config {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(60 * 60);
+        let media_upload_grant_mode = std::env::var("SSMA_MEDIA_UPLOAD_GRANT_MODE")
+            .unwrap_or_else(|_| "disabled".to_string());
+        let media_upload_grant_ttl_secs = std::env::var("SSMA_MEDIA_UPLOAD_GRANT_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(10 * 60);
         let global_rate_window_ms = std::env::var("SSMA_RATE_WINDOW_MS")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
@@ -229,8 +239,11 @@ impl Config {
             .unwrap_or(20);
         let form_captcha_mode =
             std::env::var("SSMA_FORM_CAPTCHA_MODE").unwrap_or_else(|_| "disabled".to_string());
+        let form_captcha_adapter = std::env::var("SSMA_FORM_CAPTCHA_ADAPTER")
+            .unwrap_or_else(|_| "external-json".to_string());
         let form_captcha_verify_url =
             std::env::var("SSMA_FORM_CAPTCHA_VERIFY_URL").unwrap_or_default();
+        let form_captcha_secret = std::env::var("SSMA_FORM_CAPTCHA_SECRET").unwrap_or_default();
         let form_captcha_timeout_ms = std::env::var("SSMA_FORM_CAPTCHA_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -283,6 +296,8 @@ impl Config {
             media_storage_root,
             media_max_upload_bytes,
             media_ttl_secs,
+            media_upload_grant_mode,
+            media_upload_grant_ttl_secs,
             global_rate_window_ms,
             global_rate_max,
             channel_subscribe_window_ms,
@@ -315,7 +330,9 @@ impl Config {
             form_rate_window_ms,
             form_rate_max,
             form_captcha_mode,
+            form_captcha_adapter,
             form_captcha_verify_url,
+            form_captcha_secret,
             form_captcha_timeout_ms,
             form_csrf_mode,
             form_csrf_cookie_name,
@@ -373,6 +390,25 @@ impl Config {
         std::fs::create_dir_all(&self.media_storage_root)
             .map_err(|e| format!("Cannot create media storage directory: {}", e))?;
 
+        match self.media_upload_grant_mode.as_str() {
+            "disabled" | "required" => {}
+            mode => {
+                return Err(format!(
+                    "Invalid SSMA_MEDIA_UPLOAD_GRANT_MODE '{}': expected 'disabled' or 'required'",
+                    mode
+                ));
+            }
+        }
+        if self.media_upload_grant_mode == "required" && self.form_captcha_mode == "disabled" {
+            return Err(
+                "SSMA_FORM_CAPTCHA_MODE must be external when SSMA_MEDIA_UPLOAD_GRANT_MODE=required"
+                    .to_string(),
+            );
+        }
+        if self.media_upload_grant_ttl_secs == 0 {
+            return Err("SSMA_MEDIA_UPLOAD_GRANT_TTL_SECS must be greater than 0".to_string());
+        }
+
         // Validate allowed origins format
         if !self.allowed_origins.is_empty() && self.allowed_origins != "*" {
             let origins: Vec<&str> = self.allowed_origins.split(',').collect();
@@ -413,6 +449,23 @@ impl Config {
         match self.form_captcha_mode.as_str() {
             "disabled" => {}
             "external" => {
+                match self.form_captcha_adapter.as_str() {
+                    "external-json" => {}
+                    "cap-siteverify" => {
+                        if self.form_captcha_secret.is_empty() {
+                            return Err(
+                                "SSMA_FORM_CAPTCHA_SECRET must be set when SSMA_FORM_CAPTCHA_ADAPTER=cap-siteverify"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    adapter => {
+                        return Err(format!(
+                            "Invalid SSMA_FORM_CAPTCHA_ADAPTER '{}': expected 'external-json' or 'cap-siteverify'",
+                            adapter
+                        ));
+                    }
+                }
                 if self.form_captcha_verify_url.is_empty() {
                     return Err(
                         "SSMA_FORM_CAPTCHA_VERIFY_URL must be set when SSMA_FORM_CAPTCHA_MODE=external"

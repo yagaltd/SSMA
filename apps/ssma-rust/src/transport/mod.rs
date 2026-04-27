@@ -40,6 +40,7 @@ pub struct AppState {
     pub events: broadcast::Sender<Value>,
     pub(crate) user_store: Arc<auth::UserStore>,
     pub(crate) assets: Arc<Mutex<HashMap<String, AssetRecord>>>,
+    pub(crate) upload_grants: Arc<Mutex<HashMap<String, UploadGrantRecord>>>,
     pub(crate) rtc_sessions: Arc<Mutex<HashMap<String, RtcSessionRecord>>>,
     pub(crate) channel_limits: Arc<Mutex<HashMap<String, RateBucket>>>,
     pub(crate) global_limits: Arc<Mutex<HashMap<String, RateBucket>>>,
@@ -62,6 +63,19 @@ pub(crate) struct AssetRecord {
     pub(crate) path: PathBuf,
     pub(crate) created_at_secs: u64,
     pub(crate) expires_at_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct UploadGrantRecord {
+    pub(crate) grant_id: String,
+    pub(crate) site: String,
+    pub(crate) owner_key: String,
+    pub(crate) file_name: Option<String>,
+    pub(crate) file_size: Option<u64>,
+    pub(crate) file_type: Option<String>,
+    pub(crate) created_at_secs: u64,
+    pub(crate) expires_at_secs: u64,
+    pub(crate) used: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +266,7 @@ pub fn build_state(config: Config) -> Arc<AppState> {
         events,
         user_store,
         assets: Arc::new(Mutex::new(HashMap::new())),
+        upload_grants: Arc::new(Mutex::new(HashMap::new())),
         rtc_sessions: Arc::new(Mutex::new(HashMap::new())),
         channel_limits: Arc::new(Mutex::new(HashMap::new())),
         global_limits: Arc::new(Mutex::new(HashMap::new())),
@@ -321,6 +336,10 @@ pub fn app(state: Arc<AppState>) -> Router {
         ));
 
     let media_routes = Router::new()
+        .route(
+            "/media/upload-grants",
+            post(crate::features::media::create_upload_grant),
+        )
         .route("/media/assets", post(crate::features::media::upload_media))
         .route(
             "/media/assets/:asset_id",

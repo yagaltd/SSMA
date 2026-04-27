@@ -31,6 +31,8 @@ fn test_config(tmp: &StdPath, backend_url: String) -> Config {
     config.media_storage_root = tmp.join("media");
     config.backend_url = backend_url;
     config.form_captcha_mode = "disabled".to_string();
+    config.form_captcha_adapter = "external-json".to_string();
+    config.form_captcha_secret = "".to_string();
     config.form_rate_window_ms = 60_000;
     config.form_rate_max = 20;
     config
@@ -76,7 +78,7 @@ async fn captcha_verify(
     if state.delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(state.delay_ms)).await;
     }
-    Json(json!({"ok": state.ok}))
+    Json(json!({"ok": state.ok, "success": state.ok}))
 }
 
 async fn spawn_captcha(
@@ -271,6 +273,99 @@ async fn forms_external_captcha_timeout_blocks() -> Result<()> {
     gateway_handle.abort();
     captcha_handle.abort();
     backend_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn forms_external_captcha_missing_token_returns_required() -> Result<()> {
+    let (backend_url, backend_state, backend_handle) = spawn_backend().await?;
+    let (captcha_url, _captcha_state, captcha_handle) = spawn_captcha(true, 0).await?;
+    let tmp = tempfile::tempdir()?;
+    let mut config = test_config(tmp.path(), backend_url);
+    config.form_captcha_mode = "external".to_string();
+    config.form_captcha_verify_url = format!("{}/verify", captcha_url);
+    let (gateway_base, gateway_handle) = spawn_gateway(config).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/forms/submit", gateway_base))
+        .header("content-type", "application/json")
+        .json(&json!({
+            "formName": "contact",
+            "payload": {"email": "user@example.com"}
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await?;
+    assert_eq!(body["error"], "CAPTCHA_REQUIRED");
+
+    let submitted = backend_state.submitted.lock().expect("backend lock");
+    assert_eq!(submitted.len(), 0);
+
+    gateway_handle.abort();
+    captcha_handle.abort();
+    backend_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn forms_cap_siteverify_posts_secret_and_response() -> Result<()> {
+    let (backend_url, backend_state, backend_handle) = spawn_backend().await?;
+    let (captcha_url, captcha_state, captcha_handle) = spawn_captcha(true, 0).await?;
+    let tmp = tempfile::tempdir()?;
+    let mut config = test_config(tmp.path(), backend_url);
+    config.form_captcha_mode = "external".to_string();
+    config.form_captcha_adapter = "cap-siteverify".to_string();
+    config.form_captcha_verify_url = format!("{}/verify", captcha_url);
+    config.form_captcha_secret = "cap-secret".to_string();
+    config.form_captcha_timeout_ms = 500;
+    let (gateway_base, gateway_handle) = spawn_gateway(config).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/forms/submit", gateway_base))
+        .header("content-type", "application/json")
+        .json(&json!({
+            "formName": "contact",
+            "payload": {"email": "user@example.com"},
+            "captchaToken": "cap-token"
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let submitted = backend_state.submitted.lock().expect("backend lock");
+    assert_eq!(submitted.len(), 1);
+
+    let calls = captcha_state.calls.lock().expect("captcha lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0],
+        json!({"secret": "cap-secret", "response": "cap-token"})
+    );
+
+    gateway_handle.abort();
+    captcha_handle.abort();
+    backend_handle.abort();
+    Ok(())
+}
+
+#[test]
+fn forms_cap_siteverify_requires_secret() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let mut config = test_config(tmp.path(), "http://127.0.0.1:1".to_string());
+    config.form_captcha_mode = "external".to_string();
+    config.form_captcha_adapter = "cap-siteverify".to_string();
+    config.form_captcha_verify_url = "http://127.0.0.1:2/verify".to_string();
+    config.form_captcha_secret = "".to_string();
+
+    let result = config.validate();
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .contains("SSMA_FORM_CAPTCHA_SECRET must be set"));
     Ok(())
 }
 

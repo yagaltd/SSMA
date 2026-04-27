@@ -22,6 +22,11 @@ struct ToyBackendState {
     backend_token: Arc<Mutex<Option<String>>>,
 }
 
+#[derive(Clone, Default)]
+struct CaptchaState {
+    calls: Arc<Mutex<Vec<Value>>>,
+}
+
 async fn toy_apply(State(state): State<ToyBackendState>, Json(body): Json<Value>) -> Json<Value> {
     let intents = body
         .get("intents")
@@ -59,6 +64,27 @@ async fn toy_apply(State(state): State<ToyBackendState>, Json(body): Json<Value>
         results.push(json!({"id": id, "status": "acked", "events": [event]}));
     }
     Json(json!({"results": results, "events": events}))
+}
+
+async fn captcha_verify(
+    State(state): State<CaptchaState>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    state.calls.lock().expect("captcha lock").push(body);
+    Json(json!({"ok": true, "success": true}))
+}
+
+async fn spawn_captcha() -> Result<(String, CaptchaState, tokio::task::JoinHandle<()>)> {
+    let state = CaptchaState::default();
+    let app = Router::new()
+        .route("/verify", post(captcha_verify))
+        .with_state(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    Ok((format!("http://127.0.0.1:{}", addr.port()), state, handle))
 }
 
 async fn toy_metrics(State(state): State<ToyBackendState>) -> Json<Value> {
@@ -870,6 +896,91 @@ async fn media_assets_enforce_cookie_ownership_and_backend_token() -> Result<()>
     assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
 
     gateway_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn media_upload_grant_requires_captcha_then_allows_upload() -> Result<()> {
+    let (captcha_url, captcha_state, captcha_handle) = spawn_captcha().await?;
+    let (gateway_base, gateway_handle) = spawn_gateway_with(String::new(), false, |config| {
+        config.media_max_upload_bytes = 1_024;
+        config.media_upload_grant_mode = "required".to_string();
+        config.media_upload_grant_ttl_secs = 60;
+        config.form_captcha_mode = "external".to_string();
+        config.form_captcha_adapter = "external-json".to_string();
+        config.form_captcha_verify_url = format!("{}/verify", captcha_url);
+    })
+    .await?;
+
+    let client = reqwest::Client::new();
+    let denied_form = reqwest::multipart::Form::new().part(
+        "file",
+        reqwest::multipart::Part::bytes(b"RIFFgrant-denied".to_vec())
+            .file_name("denied.wav")
+            .mime_str("audio/wav")?,
+    );
+    let denied = client
+        .post(format!("http://{}/media/assets", gateway_base))
+        .multipart(denied_form)
+        .send()
+        .await?;
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+    let denied_json = denied.json::<Value>().await?;
+    assert_eq!(denied_json["error"], "UPLOAD_GRANT_REQUIRED");
+
+    let grant_response = client
+        .post(format!("http://{}/media/upload-grants", gateway_base))
+        .json(&json!({
+            "captchaToken": "captcha-ok",
+            "fileName": "sample.wav",
+            "fileSize": 14,
+            "fileType": "audio/wav"
+        }))
+        .send()
+        .await?;
+    assert_eq!(grant_response.status(), reqwest::StatusCode::CREATED);
+    let anon_cookie = extract_cookie(&grant_response, "ssma_anon").expect("anonymous cookie");
+    let grant_json = grant_response.json::<Value>().await?;
+    let grant_id = grant_json["grant"]["grantId"].as_str().expect("grant id");
+
+    let calls = captcha_state.calls.lock().expect("captcha lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["token"], "captcha-ok");
+    assert_eq!(calls[0]["formName"], "media-upload");
+    drop(calls);
+
+    let form = reqwest::multipart::Form::new().part(
+        "file",
+        reqwest::multipart::Part::bytes(b"RIFFgrant-ok!!".to_vec())
+            .file_name("sample.wav")
+            .mime_str("audio/wav")?,
+    );
+    let upload = client
+        .post(format!("http://{}/media/assets", gateway_base))
+        .header("Cookie", &anon_cookie)
+        .header("x-ssma-upload-grant", grant_id)
+        .multipart(form)
+        .send()
+        .await?;
+    assert_eq!(upload.status(), reqwest::StatusCode::CREATED);
+
+    let reuse_form = reqwest::multipart::Form::new().part(
+        "file",
+        reqwest::multipart::Part::bytes(b"RIFFgrant-ok!!".to_vec())
+            .file_name("sample.wav")
+            .mime_str("audio/wav")?,
+    );
+    let reuse = client
+        .post(format!("http://{}/media/assets", gateway_base))
+        .header("Cookie", &anon_cookie)
+        .header("x-ssma-upload-grant", grant_id)
+        .multipart(reuse_form)
+        .send()
+        .await?;
+    assert_eq!(reuse.status(), reqwest::StatusCode::FORBIDDEN);
+
+    gateway_handle.abort();
+    captcha_handle.abort();
     Ok(())
 }
 
